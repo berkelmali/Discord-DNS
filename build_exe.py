@@ -20,13 +20,17 @@ def build():
     print("=" * 55)
 
     # Clean up old exes and spec files to keep a single application
+    import time
     for f in os.listdir(DIST_DIR) if os.path.exists(DIST_DIR) else []:
-        if f.endswith(".exe"):
+        if f.endswith(".exe") or f.endswith(".tmp"):
             try:
                 os.remove(os.path.join(DIST_DIR, f))
                 print(f"Eski sürüm silindi: {f}")
             except Exception as e:
-                print(f"Silinemedi: {f} ({e})")
+                try:
+                    os.rename(os.path.join(DIST_DIR, f), os.path.join(DIST_DIR, f"{f}.old_{int(time.time())}.tmp"))
+                except Exception:
+                    pass
 
     for f in os.listdir("."):
         if f.endswith(".spec") and f != f"{EXE_NAME}.spec":

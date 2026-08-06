@@ -232,8 +232,9 @@ class DiscordDNSApp(ctk.CTk):
                 # Downsample using Lanczos anti-aliasing to 168x168 (3x scale) for Retina crispness
                 hd_img = orig_img.resize((168, 168), Image.Resampling.LANCZOS)
                 self._logo_image = ctk.CTkImage(light_image=hd_img, dark_image=hd_img, size=(56, 56))
-                logo_lbl = ctk.CTkLabel(frame, image=self._logo_image, text="")
+                logo_lbl = ctk.CTkLabel(frame, image=self._logo_image, text="", cursor="hand2")
                 logo_lbl.grid(row=0, column=0, rowspan=2, padx=(22, 12), pady=16, sticky="w")
+                logo_lbl.bind("<Button-1>", lambda e: self.show_info_dialog())
             except Exception:
                 pass
 
@@ -248,12 +249,21 @@ class DiscordDNSApp(ctk.CTk):
         ).pack(side="left")
 
         version_badge = ctk.CTkLabel(
-            title_frame, text="v3.0",
+            title_frame, text="v3.5",
             font=ctk.CTkFont(family="Segoe UI Variable", size=11, weight="bold"),
             fg_color=BLURPLE, text_color="#FFFFFF",
             corner_radius=6, padx=8, pady=2
         )
         version_badge.pack(side="left", padx=(10, 0), pady=(6, 0))
+
+        info_btn = ctk.CTkButton(
+            title_frame, text="ℹ  Bilgi & Rehber",
+            font=ctk.CTkFont(family="Segoe UI Variable", size=11, weight="bold"),
+            fg_color=SURFACE, hover_color=BORDER, text_color=CYAN,
+            height=26, corner_radius=6, border_width=1, border_color="#2A3048",
+            command=self.show_info_dialog
+        )
+        info_btn.pack(side="left", padx=(10, 0), pady=(4, 0))
 
         # Subtitle
         ctk.CTkLabel(
@@ -1317,6 +1327,86 @@ class DiscordDNSApp(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════════════════════
     #  MISC
     # ═══════════════════════════════════════════════════════════════════════════════
+
+    def show_info_dialog(self):
+        """Open a detailed, dark-themed information & user guide window."""
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("ℹ Discord DNS v3.5 — Bilgi & Kullanım Rehberi")
+        dialog.geometry("660x650")
+        dialog.configure(fg_color="#0F111A")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        # Center dialog relative to main window
+        try:
+            dialog.update_idletasks()
+            x = self.winfo_x() + (self.winfo_width() // 2) - (660 // 2)
+            y = self.winfo_y() + (self.winfo_height() // 2) - (650 // 2)
+            dialog.geometry(f"660x650+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+        # Title bar header frame
+        hdr = ctk.CTkFrame(dialog, fg_color="#181B28", corner_radius=12)
+        hdr.pack(fill="x", padx=16, pady=(16, 8))
+
+        ctk.CTkLabel(
+            hdr, text="⚡ Discord DNS v3.5 — Uygulama Rehberi & Bilgi",
+            font=ctk.CTkFont(family="Segoe UI Variable Display", size=16, weight="bold"),
+            text_color="#FFFFFF"
+        ).pack(side="left", padx=16, pady=12)
+
+        # Scrollable Content Body
+        body = ctk.CTkScrollableFrame(dialog, fg_color="#121520", corner_radius=12)
+        body.pack(fill="both", expand=True, padx=16, pady=8)
+
+        text_sections = [
+            ("📌 Uygulama Ne İşe Yarar?",
+             "Discord DNS v3.5; Türkiye'deki internet servis sağlayıcılarının (İSS) Discord ve benzeri platformlara uyguladığı DNS Yönlendirmesi (DNS Hijacking), SNI Engellemesi ve Derin Paket İnceleme (DPI) kısıtlamalarını tek tıkla aşmanızı sağlayan akıllı bir tünelleme ve şifreli DNS yazılımıdır."),
+
+            ("🔀 Hangi Kanalı Seçmeliyim? (Kim Nasıl Kullanmalı?)",
+             "• 🟢 Kanal 1: Standart DNS (TürkNet & Engelsiz İSS'ler):\n  İSS'nizde ağır paket engellemesi yoksa Cloudflare (1.1.1.1) veya AdGuard ile en düşük ping değerini (10-15 ms) sunar.\n\n"
+             "• 🔒 Kanal 2: DoH (DNS-over-HTTPS) Şifreli Mod:\n  İSS'niz varsayılan DNS sorgularınızı müdahale ile kendi sunucularına yönlendiriyorsa, sorguları 443/TLS portu üzerinden tam şifreleyerek engelleri aşar.\n\n"
+             "• ⚡ Kanal 3: DPI Bypass (Superonline & Türk Telekom Özel):\n  Superonline Fiber ve Türk Telekom altyapısındaki ağır SNI ve paket inceleme engellerini GoodbyeDPI paket bölme (TLS ClientHello fragmentation) algoritmasıyla %100 aşar."),
+
+            ("🚀 Nasıl Daha Verimli Kullanılır?",
+             "1. Yönetici İzni: Ağ kartı DNS adreslerini değiştirmek ve tünel sürücüsünü çalıştırmak için uygulamayı 'Yönetici Olarak Çalıştır'ın.\n"
+             "2. En Hızlı DNS'i Bulun: '⚡ En Hızlı DNS'yi Bul' butonuna basarak bölgenizdeki en düşük gecikmeli DNS'i otomatik tespit edin.\n"
+             "3. Heartbeat Guard: Sesli sohbet sırasında kesinti yaşamamak için arka plan bekçisini aktif tutun. Bağlantı düştüğünde ses görüşmeniz kopmadan yedek DNS'e geçer.\n"
+             "4. Manuel Kontrol: Uygulama ilk açıldığında internetinizi değiştirmez; siz 'ETKİNLEŞTİR' butonuna bastığınızda devreye girer."),
+
+            ("🛡 Otomatik Güvenlik ve Temizlik",
+             "Uygulamayı kapattığınızda veya sistem tepsisinden çıktığınızda Windows DNS ayarlarınız otomatik olarak orijinal varsayılanına (DHCP) döner. Arka planda çalışan tünel ve ağ sürücüsü güvenle temizlenir."),
+
+            ("📜 Lisans & Telif Bilgisi",
+             "Geliştirici: Berk Elmalı (https://github.com/berkelmali/Discord-DNS)\n"
+             "Bu proje açık kaynak kodludur. Kodları kullanan veya yeniden dağıtan herkes geliştirici atıf şartını korumakla yükümlüdür.")
+        ]
+
+        for title, desc in text_sections:
+            sec_frame = ctk.CTkFrame(body, fg_color="#1A1D2C", corner_radius=10)
+            sec_frame.pack(fill="x", padx=8, pady=6)
+
+            ctk.CTkLabel(
+                sec_frame, text=title,
+                font=ctk.CTkFont(family="Segoe UI Variable", size=13, weight="bold"),
+                text_color="#5865F2"
+            ).pack(anchor="w", padx=14, pady=(10, 4))
+
+            ctk.CTkLabel(
+                sec_frame, text=desc,
+                font=ctk.CTkFont(family="Segoe UI Variable", size=11),
+                text_color="#DCDDDE", justify="left", wraplength=570
+            ).pack(anchor="w", padx=14, pady=(0, 10))
+
+        # Close Button
+        ctk.CTkButton(
+            dialog, text="Anladım, Kapat",
+            font=ctk.CTkFont(family="Segoe UI Variable", size=12, weight="bold"),
+            fg_color="#5865F2", hover_color="#4752C4",
+            height=38, corner_radius=8,
+            command=dialog.destroy
+        ).pack(fill="x", padx=16, pady=12)
 
     def manual_flush_dns(self):
         self.log("DNS önbelleği temizleniyor...")
