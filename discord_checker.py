@@ -60,7 +60,7 @@ def check_discord_connection(timeout: float = 3.0) -> dict:
             elapsed_ms = (time.perf_counter() - start) * 1000
             total_time += elapsed_ms
             successful += 1
-            results.append(f"{host}: {int(elapsed_ms)} ms ✓")
+            results.append(f"{host}: {int(elapsed_ms)} ms OK")
         except Exception as exc:
             results.append(f"{host}: Bağlanamadı ({type(exc).__name__})")
 

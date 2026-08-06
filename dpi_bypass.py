@@ -29,8 +29,8 @@ def _get_bin_dir() -> str:
 BIN_DIR = _get_bin_dir()
 GOODBYEDPI_EXE = os.path.join(BIN_DIR, "goodbyedpi.exe")
 
-# GoodbyeDPI download source (v0.2.3-rc3 release binary)
-GOODBYEDPI_ZIP_URL = "https://github.com/ValdikSS/GoodbyeDPI/releases/download/v0.2.3-rc3/goodbyedpi-0.2.3-rc3.zip"
+# GoodbyeDPI download source (v0.2.2 stable release binary)
+GOODBYEDPI_ZIP_URL = "https://github.com/ValdikSS/GoodbyeDPI/releases/download/0.2.2/goodbyedpi-0.2.2.zip"
 
 # Global process handle
 _dpi_process: Optional[subprocess.Popen] = None
@@ -144,7 +144,7 @@ def ensure_goodbyedpi_installed() -> Tuple[bool, str]:
                 break
 
         if os.path.exists(GOODBYEDPI_EXE):
-            return True, "GoodbyeDPI indirme ve kurulumu tamamlandı ✓"
+            return True, "GoodbyeDPI indirme ve kurulumu tamamlandı [OK]"
         return False, "GoodbyeDPI indirildi ancak çalıştırılabilir dosya bulunamadı."
     except Exception as e:
         return False, f"GoodbyeDPI indirilemedi: {e}"
@@ -239,7 +239,7 @@ def stop_dpi_bypass() -> Tuple[bool, str]:
     except Exception:
         pass
 
-    return True, "DPI Bypass Servisi Durduruldu ve Temizlendi ✓"
+    return True, "DPI Bypass Servisi Durduruldu ve Temizlendi [OK]"
 
 
 def is_dpi_bypass_running() -> bool:
