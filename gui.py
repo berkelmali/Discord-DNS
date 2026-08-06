@@ -1160,9 +1160,12 @@ class DiscordDNSApp(ctk.CTk):
 
     def _do_toggle(self, is_managed):
         if is_managed:
-            ok, msg = dns_manager.restore_original_dns(self.selected_adapter)
+            ok, msg = dns_manager.reset_dns_to_dhcp(self.selected_adapter)
             dpi_bypass.stop_dpi_bypass()
-            label = "Orijinal DNS geri yüklendi ve DPI Tüneli kapatıldı"
+            if os.path.exists(dns_manager.BACKUP_FILE):
+                try: os.remove(dns_manager.BACKUP_FILE)
+                except Exception: pass
+            label = "Orijinal DNS (DHCP) geri yüklendi ve DPI Tüneli kapatıldı"
             is_enabling = False
         else:
             enable_doh = "Kanal 2" in self.active_channel or self.doh_enabled_var.get()
@@ -1186,10 +1189,11 @@ class DiscordDNSApp(ctk.CTk):
         self.action_btn.configure(state="normal")
         self.log(msg)
         self.log(f"{'✓' if ok else '✗'}  {label}")
-        if ok:
-            self.user_dns_enabled = is_enabling
-            if self._guard:
-                self._guard.is_dns_active = self.user_dns_enabled
+        self.user_dns_enabled = is_enabling
+        if not is_enabling:
+            self.dns_active_start_time = None
+        if self._guard:
+            self._guard.is_dns_active = self.user_dns_enabled
         self.refresh_status()
 
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -1455,7 +1459,7 @@ class DiscordDNSApp(ctk.CTk):
                                   "DNS değiştirmek için Yönetici olarak çalıştırın.")
 
     def on_app_close(self):
-        """Full application shutdown — restores DNS, stops DPI tunnel, and terminates app."""
+        """Full application shutdown — restores DNS, stops DPI tunnel, and terminates app completely."""
         # Stop heartbeat guard
         if self._guard:
             self._guard.stop()
@@ -1463,9 +1467,15 @@ class DiscordDNSApp(ctk.CTk):
         # Stop DPI Bypass engine & WinDivert driver
         dpi_bypass.stop_dpi_bypass()
 
-        # Restore DNS if custom DNS was enabled or active
+        # Reset DNS to Automatic (DHCP) on all active adapters
         if self.is_admin_user:
-            dns_manager.restore_original_dns(self.selected_adapter)
+            for adp in (self.adapters or ["Wi-Fi", "Ethernet"]):
+                dns_manager.reset_dns_to_dhcp(adp)
+            if os.path.exists(dns_manager.BACKUP_FILE):
+                try:
+                    os.remove(dns_manager.BACKUP_FILE)
+                except Exception:
+                    pass
 
         # Stop tray icon
         if self._tray_icon:
@@ -1475,6 +1485,7 @@ class DiscordDNSApp(ctk.CTk):
                 pass
 
         self.destroy()
+        sys.exit(0)
 
 
 # ─── Entry ────────────────────────────────────────────────────────────────────────
