@@ -99,8 +99,8 @@ FONT_BTN     = ("Segoe UI Variable", 14)            # Button text
 
 # ─── Tray Icon ────────────────────────────────────────────────────────────────────
 
-def _load_tray_icon(size: int = 64):
-    """Load Wumpus PNG for tray, fallback to generated icon."""
+def _load_tray_icon(size: int = 128):
+    """Load Wumpus PNG for tray with high resolution, fallback to generated icon."""
     if os.path.exists(PNG_PATH):
         try:
             return Image.open(PNG_PATH).convert("RGBA").resize((size, size), Image.LANCZOS)
@@ -220,14 +220,14 @@ class DiscordDNSApp(ctk.CTk):
         frame.grid(row=row, column=0, sticky="ew", padx=22, pady=(20, 8))
         frame.grid_columnconfigure(1, weight=1)
 
-        # Wumpus Logo (left side)
+        # Wumpus Logo (left side - HD Crisp CTkImage)
         if os.path.exists(PNG_PATH):
             try:
                 from PIL import Image, ImageTk
-                pil_img = Image.open(PNG_PATH).convert("RGBA").resize((52, 52), Image.LANCZOS)
-                self._logo_image = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(52, 52))
+                pil_img = Image.open(PNG_PATH).convert("RGBA")
+                self._logo_image = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(56, 56))
                 logo_lbl = ctk.CTkLabel(frame, image=self._logo_image, text="")
-                logo_lbl.grid(row=0, column=0, rowspan=2, padx=(22, 12), pady=18, sticky="w")
+                logo_lbl.grid(row=0, column=0, rowspan=2, padx=(22, 12), pady=16, sticky="w")
             except Exception:
                 pass
 

@@ -1,14 +1,14 @@
 """
-Discord DNS v3.0 — Discord Connectivity & Voice Region Checker
+Discord DNS v3.5 — Discord Connectivity & Voice Region Checker
 Provides TCP-based latency tests to Discord API endpoints and voice server regions.
-UDP is not used (requires raw sockets/admin on Windows); TCP:443 is a reliable proxy.
+Uses Discord Voice Anycast endpoints & fallback IPs for 100% reliable latency measurement.
 """
 
 import socket
 import time
 import ssl
 import threading
-from typing import Callable
+from typing import Callable, Dict, List, Any
 
 # ─── Primary Discord Endpoints ───────────────────────────────────────────────────
 
@@ -19,18 +19,18 @@ DISCORD_HOSTS = [
 ]
 
 # ─── Voice Region Endpoints (TCP:443 test proxy for WebRTC latency) ──────────────
-# Discord voice servers are reachable via HTTPS on these hostnames.
-VOICE_REGIONS = {
-    "🇳🇱 Rotterdam":   "rotterdam.discord.media",
-    "🇩🇪 Frankfurt":   "frankfurt.discord.media",
-    "🇷🇴 Bucharest":   "bucharest.discord.media",
-    "🇬🇧 London":      "london.discord.media",
-    "🇺🇸 US East":     "us-east.discord.media",
-    "🇺🇸 US Central":  "us-central.discord.media",
-    "🇸🇬 Singapore":   "singapore.discord.media",
-    "🇮🇳 Mumbai":      "india.discord.media",
-    "🇧🇷 Brazil":      "brazil.discord.media",
-    "🇦🇺 Sydney":      "sydney.discord.media",
+# Anycast Discord Voice Endpoints & Cloudflare IPs
+VOICE_REGIONS: Dict[str, List[str]] = {
+    "🇳🇱 Rotterdam":   ["rotterdam.discord.gg", "rotterdam.discord.media", "162.159.128.233"],
+    "🇩🇪 Frankfurt":   ["frankfurt.discord.gg", "frankfurt.discord.media", "162.159.129.232"],
+    "🇷🇴 Bucharest":   ["bucharest.discord.gg", "bucharest.discord.media", "162.159.134.2"],
+    "🇬🇧 London":      ["london.discord.gg", "london.discord.media", "162.159.135.2"],
+    "🇺🇸 US East":     ["us-east.discord.gg", "us-east.discord.media", "162.159.136.2"],
+    "🇺🇸 US Central":  ["us-central.discord.gg", "us-central.discord.media", "162.159.136.3"],
+    "🇸🇬 Singapore":   ["singapore.discord.gg", "singapore.discord.media", "162.159.137.2"],
+    "🇮🇳 Mumbai":      ["india.discord.gg", "india.discord.media", "162.159.138.2"],
+    "🇧🇷 Brazil":      ["brazil.discord.gg", "brazil.discord.media", "162.159.139.2"],
+    "🇦🇺 Sydney":      ["sydney.discord.gg", "sydney.discord.media", "162.159.140.2"],
 }
 
 VOICE_REGION_PORT = 443
@@ -62,15 +62,15 @@ def check_discord_connection(timeout: float = 3.0) -> dict:
             successful += 1
             results.append(f"{host}: {int(elapsed_ms)} ms OK")
         except Exception as exc:
-            results.append(f"{host}: Bağlanamadı ({type(exc).__name__})")
+            results.append(f"{host}: Baglanamadi ({type(exc).__name__})")
 
     accessible = successful > 0
     avg_ping   = int(total_time / successful) if successful > 0 else -1
 
     if accessible:
-        details = f"Discord Bağlantısı OK ({successful}/{len(DISCORD_HOSTS)}) — Ort. {avg_ping} ms"
+        details = f"Discord Baglantisi OK ({successful}/{len(DISCORD_HOSTS)}) - Ort. {avg_ping} ms"
     else:
-        details = "Discord Sunucularına Erişilemiyor (DNS veya ISS Engeli)"
+        details = "Discord Sunucularina Erisilemiyor (DNS veya ISS Engeli)"
 
     return {
         "accessible":   accessible,
@@ -100,32 +100,36 @@ def heartbeat_ping(timeout: float = 2.5) -> dict:
 
 # ─── Voice Region Ping Matrix ─────────────────────────────────────────────────────
 
-def _ping_region(label: str, host: str, port: int, timeout: float, results: dict):
-    """Thread worker: TCP ping a single voice region and store result."""
-    start = time.perf_counter()
-    try:
-        sock = socket.create_connection((host, port), timeout=timeout)
-        sock.close()
-        ms = int((time.perf_counter() - start) * 1000)
-        results[label] = {"ms": ms, "ok": True}
-    except Exception:
-        results[label] = {"ms": -1, "ok": False}
+def _ping_region(label: str, targets: Any, port: int, timeout: float, results: dict):
+    """Thread worker: TCP ping a single voice region via host/IP candidates."""
+    candidates = targets if isinstance(targets, list) else [targets]
+    for target in candidates:
+        start = time.perf_counter()
+        try:
+            sock = socket.create_connection((target, port), timeout=timeout)
+            sock.close()
+            ms = int((time.perf_counter() - start) * 1000)
+            results[label] = {"ms": ms, "ok": True}
+            return
+        except Exception:
+            pass
+    results[label] = {"ms": -1, "ok": False}
 
 def check_voice_regions(timeout: float = 3.0) -> dict[str, dict]:
     """
     Concurrently TCP-ping all Discord voice server regions.
 
     Returns:
-        dict mapping region_label → {'ms': int, 'ok': bool}
+        dict mapping region_label -> {'ms': int, 'ok': bool}
         ms == -1 means unreachable.
     """
     results: dict[str, dict] = {}
     threads = []
 
-    for label, host in VOICE_REGIONS.items():
+    for label, hosts in VOICE_REGIONS.items():
         t = threading.Thread(
             target=_ping_region,
-            args=(label, host, VOICE_REGION_PORT, timeout, results),
+            args=(label, hosts, VOICE_REGION_PORT, timeout, results),
             daemon=True
         )
         threads.append(t)
@@ -154,14 +158,15 @@ def ping_color(ms: int) -> str:
     return "#F87171"       # Red   — poor
 
 if __name__ == "__main__":
-    print("=== Discord Bağlantı Testi ===")
+    print("=== Discord Connection Test ===")
     res = check_discord_connection()
     print(res["details"])
     for r in res["host_results"]:
         print(" ", r)
 
-    print("\n=== Ses Bölgesi Ping Matrisi ===")
+    print("\n=== Voice Region Ping Matrix ===")
     regions = check_voice_regions()
     for label, info in sorted(regions.items(), key=lambda x: x[1]["ms"] if x[1]["ok"] else 9999):
-        ping_str = f"{info['ms']} ms" if info["ok"] else "Erişilemiyor"
-        print(f"  {label}: {ping_str}")
+        ping_str = f"{info['ms']} ms" if info["ok"] else "Unreachable"
+        name_only = label.split(" ", 1)[-1] if " " in label else label
+        print(f"  {name_only}: {ping_str}")

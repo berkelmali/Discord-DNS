@@ -11,11 +11,20 @@ Projemize katkıda bulunmak istediğiniz için teşekkür ederiz! **Discord DNS*
 3. **Hata Bildirimi (Bug Reports)**:
    - Karşılaştığınız hataları GitHub Issues kısmından detaylı şekilde bildirebilirsiniz.
 
+## 🧪 Geliştirici Bağlantı Test Araçları (Diagnostic Testers)
+
+Projeye katkıda bulunurken sistem bağlantı durumunu ve ses bölgesi ping matrisini test etmek için `tests/test_connection.py` teşhis aracını kullanabilirsiniz:
+
+```bash
+# Sistem, İSS, Discord uç noktaları ve Ses Bölgesi Ping Matrisini test etmek için:
+python tests/test_connection.py
+```
+
 ## 🚀 Geliştirme Adımları
 
 1. Repoyu çatallayın (Fork edin).
 2. Özelliğiniz için yeni bir dal oluşturun: `git checkout -b ozellik/yeni-kanal`.
-3. Değişikliklerinizi yapın ve test edin: `python -m py_compile gui.py main.py`.
+3. Değişikliklerinizi yapın ve test aracını çalıştırın: `python tests/test_connection.py`.
 4. Değişikliklerinizi işleyin (Commit): `git commit -m 'feat: Yeni İSS tünel modu eklendi'`.
 5. Dalınıza itin (Push): `git push origin ozellik/yeni-kanal`.
 6. Bir Pull Request (PR) açın.
