@@ -1,0 +1,7 @@
+# Discord DNS v3.0 — Bağımlılıklar
+# Kurulum: pip install -r requirements.txt
+
+customtkinter>=6.0.0    # Modern dark-theme Tkinter wrapper
+Pillow>=10.0.0          # System tray icon generation
+pystray>=0.19.5         # Windows System Tray integration
+pyinstaller>=6.0.0      # EXE packaging (only needed for build)

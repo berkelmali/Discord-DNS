@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller & Build artifacts
+build/
+*.spec
+!Discord_DNS_v3.spec
+
+# Persistent local backup and bin directories generated at runtime
+*.log
+*.tmp
+original_dns_backup.json
+
+# Environment
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE / Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Antigravity artifacts
+.agents/
+.gemini/

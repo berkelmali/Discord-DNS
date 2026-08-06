@@ -1,0 +1,23 @@
+# Discord DNS — Katkıda Bulunma Rehberi (Contributing Guide)
+
+Projemize katkıda bulunmak istediğiniz için teşekkür ederiz! **Discord DNS**, topluluk katkılarıyla büyüyen açık kaynaklı bir yazılımdır.
+
+## 🛠 Nasıl Katkıda Bulunabilirsiniz?
+
+1. **İSS Engelleme İncelemeleri ve Parametre Güncellemeleri**:
+   - Superonline, Türk Telekom veya farklı İSS'lerde yaşadığınız yeni engellemeleri bildirebilir veya `dpi_bypass.py` içine yeni bypass parametreleri ekleyebilirsiniz.
+2. **Yeni DNS Profilleri**:
+   - `dns_manager.py` içine daha düşük ping veren yeni DNS sunucuları önerebilirsiniz.
+3. **Hata Bildirimi (Bug Reports)**:
+   - Karşılaştığınız hataları GitHub Issues kısmından detaylı şekilde bildirebilirsiniz.
+
+## 🚀 Geliştirme Adımları
+
+1. Repoyu çatallayın (Fork edin).
+2. Özelliğiniz için yeni bir dal oluşturun: `git checkout -b ozellik/yeni-kanal`.
+3. Değişikliklerinizi yapın ve test edin: `python -m py_compile gui.py main.py`.
+4. Değişikliklerinizi işleyin (Commit): `git commit -m 'feat: Yeni İSS tünel modu eklendi'`.
+5. Dalınıza itin (Push): `git push origin ozellik/yeni-kanal`.
+6. Bir Pull Request (PR) açın.
+
+Katkılarınız için şimdiden teşekkürler!
