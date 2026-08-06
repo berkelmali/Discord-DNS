@@ -340,4 +340,60 @@ def optimize_dns_sockets() -> str:
     """
     res1 = run_cmd("ipconfig /flushdns")
     run_cmd("nbtstat -R")
-    return "DNS & NetBIOS Soket Önbelleği Optimize Edildi ✓"
+    return "DNS & NetBIOS Soket Önbelleği Optimize Edildi [OK]"
+
+
+# ─── Configuration & Autostart Persistence ────────────────────────────────────────
+
+def save_config(config_dict: dict) -> bool:
+    """Save user application preferences to config.json."""
+    try:
+        cfg_path = os.path.join(_get_backup_dir(), "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(config_dict, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
+def load_config() -> dict:
+    """Load user application preferences from config.json."""
+    try:
+        cfg_path = os.path.join(_get_backup_dir(), "config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+APP_REG_KEY = "DiscordDNS"
+
+def set_autostart(enable: bool = True) -> bool:
+    """Add or remove app from Windows Startup Registry."""
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_ALL_ACCESS)
+        if enable:
+            exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
+            winreg.SetValueEx(key, APP_REG_KEY, 0, winreg.REG_SZ, f'"{exe_path}"')
+        else:
+            try:
+                winreg.DeleteValue(key, APP_REG_KEY)
+            except FileNotFoundError:
+                pass
+        winreg.CloseKey(key)
+        return True
+    except Exception:
+        return False
+
+def is_autostart_enabled() -> bool:
+    """Check if app is configured to run at Windows startup."""
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_READ)
+        val, _ = winreg.QueryValueEx(key, APP_REG_KEY)
+        winreg.CloseKey(key)
+        return bool(val)
+    except Exception:
+        return False

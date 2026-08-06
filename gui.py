@@ -220,12 +220,18 @@ class DiscordDNSApp(ctk.CTk):
         frame.grid(row=row, column=0, sticky="ew", padx=22, pady=(20, 8))
         frame.grid_columnconfigure(1, weight=1)
 
-        # Wumpus Logo (left side - HD Crisp CTkImage)
-        if os.path.exists(PNG_PATH):
+        # Wumpus Logo (left side - Ultra-HD Lanczos Crisp CTkImage)
+        mini_logo_path = os.path.join(ASSETS_DIR, "app_logo_mini.png")
+        if not os.path.exists(mini_logo_path):
+            mini_logo_path = PNG_PATH
+
+        if os.path.exists(mini_logo_path):
             try:
-                from PIL import Image, ImageTk
-                pil_img = Image.open(PNG_PATH).convert("RGBA")
-                self._logo_image = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(56, 56))
+                from PIL import Image
+                orig_img = Image.open(mini_logo_path).convert("RGBA")
+                # Downsample using Lanczos anti-aliasing to 168x168 (3x scale) for Retina crispness
+                hd_img = orig_img.resize((168, 168), Image.Resampling.LANCZOS)
+                self._logo_image = ctk.CTkImage(light_image=hd_img, dark_image=hd_img, size=(56, 56))
                 logo_lbl = ctk.CTkLabel(frame, image=self._logo_image, text="")
                 logo_lbl.grid(row=0, column=0, rowspan=2, padx=(22, 12), pady=16, sticky="w")
             except Exception:
@@ -828,14 +834,26 @@ class DiscordDNSApp(ctk.CTk):
             text_color=TEXT_MUTED
         ).grid(row=0, column=0, sticky="w")
 
+        btn_frame = ctk.CTkFrame(top, fg_color="transparent")
+        btn_frame.grid(row=0, column=1, sticky="e")
+
         ctk.CTkButton(
-            top, text="Temizle",
+            btn_frame, text="💾 Kaydet",
+            font=ctk.CTkFont(family="Segoe UI Variable", size=11),
+            fg_color=SURFACE, hover_color=BORDER,
+            text_color=TEXT_MUTED,
+            height=26, width=70, corner_radius=6,
+            command=self.save_logs_to_file
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            btn_frame, text="Temizle",
             font=ctk.CTkFont(family="Segoe UI Variable", size=11),
             fg_color=SURFACE, hover_color=BORDER,
             text_color=TEXT_MUTED,
             height=26, width=65, corner_radius=6,
             command=self.clear_logs
-        ).grid(row=0, column=1, sticky="e")
+        ).pack(side="left")
 
         self.log_box = ctk.CTkTextbox(
             frame, height=180,
@@ -1309,6 +1327,29 @@ class DiscordDNSApp(ctk.CTk):
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
         self.log("Günlük temizlendi.")
+
+    def save_logs_to_file(self):
+        """Export system log console text to a .log file."""
+        try:
+            from tkinter import filedialog
+            content = self.log_box.get("1.0", "end").strip()
+            if not content:
+                messagebox.showinfo("Bilgi", "Kaydedilecek günlük verisi bulunamadı.")
+                return
+            desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+            file_path = filedialog.asksaveasfilename(
+                initialdir=desktop,
+                initialfile="discord_dns_system.log",
+                defaultextension=".log",
+                filetypes=[("Log Files", "*.log"), ("Text Files", "*.txt"), ("All Files", "*.*")]
+            )
+            if file_path:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                self.log(f"💾 Sistem günlüğü kaydedildi: {file_path}")
+                messagebox.showinfo("Başarılı", f"Sistem günlüğü başarıyla kaydedildi:\n{file_path}")
+        except Exception as e:
+            messagebox.showerror("Hata", f"Günlük kaydedilemedi: {e}")
 
     def log(self, text):
         ts = datetime.datetime.now().strftime("%H:%M:%S")
