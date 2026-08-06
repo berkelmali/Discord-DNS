@@ -62,13 +62,14 @@ def run_powershell(cmd: str) -> str:
         completed = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
             capture_output=True,
-            text=True,
             check=True,
             creationflags=CREATE_NO_WINDOW
         )
-        return completed.stdout.strip()
+        return completed.stdout.decode("utf-8", errors="replace").strip()
     except subprocess.CalledProcessError as e:
-        return f"ERROR: {e.stderr.strip() or e.stdout.strip()}"
+        stdout = e.stdout.decode("utf-8", errors="replace").strip() if e.stdout else ""
+        stderr = e.stderr.decode("utf-8", errors="replace").strip() if e.stderr else ""
+        return f"ERROR: {stderr or stdout or 'Command failed'}"
     except Exception as e:
         return f"ERROR: {str(e)}"
 
@@ -78,11 +79,10 @@ def run_cmd(cmd: str) -> str:
         completed = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
             shell=True,
             creationflags=CREATE_NO_WINDOW
         )
-        return completed.stdout.strip()
+        return completed.stdout.decode("utf-8", errors="replace").strip()
     except Exception as e:
         return f"ERROR: {str(e)}"
 
