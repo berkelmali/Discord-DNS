@@ -65,9 +65,17 @@ def build():
 
     PyInstaller.__main__.run(args)
 
+    # Post-build strict cleanup: remove any leftover .tmp or old files in dist
+    for f in os.listdir(DIST_DIR):
+        if f != f"{EXE_NAME}.exe":
+            try:
+                os.remove(os.path.join(DIST_DIR, f))
+            except Exception:
+                pass
+
     final = os.path.abspath(f"{DIST_DIR}/{exe_name}.exe")
     print("\n" + "=" * 55)
-    print("  Derleme Tamamlandi!")
+    print("  Derleme Tamamlandi! Tek Executable Hazir.")
     print(f"  Cikti: {final}")
     print("=" * 55)
 
