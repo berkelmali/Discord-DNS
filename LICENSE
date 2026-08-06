@@ -1,16 +1,26 @@
-MIT License
+MIT License with Mandatory Attribution Clause
 
-Copyright (c) 2026 Berk Elmalı & Discord DNS Open Source Contributors
+Copyright (c) 2026 Berk Elmalı (https://github.com/berkelmali)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction restriction, including without limitation the rights
+in the Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. MANDATORY ATTRIBUTION / TELİF VE ATIF ZORUNLULUĞU:
+   Any person or entity who copies, modifies, redistributes, or creates derivative
+   works based on this Software or any part of it MUST explicitly attribute the original
+   author Berk Elmalı and include a direct, visible link to the original GitHub repository:
+   https://github.com/berkelmali/Discord-DNS
+
+   Bu yazılımın veya kodların herhangi bir kısmını kullanan, değiştiren, kopyalayan ya da
+   yeniden dağıtan herkes; projenin orijinal geliştiricisinin Berk Elmalı olduğunu ve
+   orijinal depo bağlantısını (https://github.com/berkelmali/Discord-DNS) açıkça belirtmek ZORUNDADIR.
+
+2. The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,

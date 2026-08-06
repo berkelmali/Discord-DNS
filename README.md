@@ -118,6 +118,9 @@ Derlenmiş `.exe` dosyaları imzasız (unsigned executable) olduğu için Window
 
 ---
 
-## 📜 Lisans
+## 📜 Lisans & Atıf Zorunluluğu (Attribution Requirement)
 
-Bu proje [MIT Lisansı](LICENSE) altında lisanslanmıştır. Özgürce kullanabilir, değiştirebilir ve dağıtabilirsiniz.
+Bu proje **Berk Elmalı** tarafından geliştirilmiş olup [Zorunlu Atıf Şartlı MIT Lisansı](LICENSE) altında açık kaynak olarak paylaşılmıştır.
+
+> [!IMPORTANT]
+> **Atıf (Credit) Zorunluluğu**: Bu projenin kodlarını veya herhangi bir bölümünü kopyalayan, özelleştiren, yeniden dağıtan veya çatal (fork) oluşturan herkes, projenin **Berk Elmalı** tarafından geliştirildiğini ve orijinal depo bağlantısını (**https://github.com/berkelmali/Discord-DNS**) açıkça belirtmek **ZORUNDADIR**.
