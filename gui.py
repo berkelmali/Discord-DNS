@@ -1,5 +1,5 @@
 """
-Discord DNS v3.0 — Premium GUI
+Discord DNS v3.6 — Premium GUI
 CustomTkinter dark-mode interface with Discord-native design language.
 Features: DNS preset switcher, Voice Region Ping Matrix, Heartbeat Guard,
           System Tray minimization, auto DNS restore on exit.
@@ -37,12 +37,18 @@ except ImportError:
 
 # ─── App Modules ─────────────────────────────────────────────────────────────────
 
+import atexit
+import signal
+
 import dns_manager
 import discord_checker
 import admin_utils
 import heartbeat_guard
 import dns_benchmark
 import dpi_bypass
+import doh_proxy
+import diagnostics
+import strategy_finder
 
 # ─── Theme ────────────────────────────────────────────────────────────────────────
 
@@ -124,7 +130,7 @@ class DiscordDNSApp(ctk.CTk):
         super().__init__()
 
         # Window setup
-        self.title("Discord DNS v3.0")
+        self.title("Discord DNS v3.6")
         self.geometry("820x980")
         self.minsize(780, 880)
         self.configure(fg_color=BG)
@@ -136,6 +142,7 @@ class DiscordDNSApp(ctk.CTk):
                 pass
 
         # State
+        self._cleanup_done        = False
         self.is_admin_user        = admin_utils.is_admin()
         self.adapters             = dns_manager.get_network_adapters()
         self.selected_adapter     = self.adapters[0] if self.adapters else "Wi-Fi"
@@ -171,6 +178,7 @@ class DiscordDNSApp(ctk.CTk):
         self._tick_active_timer()
         self._start_adapter_autopilot()
         self._detect_isp_async()
+        self._register_emergency_cleanup()
 
         # X button → minimize to tray (not quit)
         self.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
@@ -208,7 +216,7 @@ class DiscordDNSApp(ctk.CTk):
         self._build_status_bar()
 
         # Initial log
-        self.log("Discord DNS v3.0 başlatıldı.")
+        self.log("Discord DNS v3.6 başlatıldı.")
         if not self.is_admin_user:
             self.log("⚠  Yönetici yetkisi yok. DNS değiştirmek için yetki yükseltin.")
 
@@ -249,7 +257,7 @@ class DiscordDNSApp(ctk.CTk):
         ).pack(side="left")
 
         version_badge = ctk.CTkLabel(
-            title_frame, text="v3.5",
+            title_frame, text="v3.6",
             font=ctk.CTkFont(family="Segoe UI Variable", size=11, weight="bold"),
             fg_color=BLURPLE, text_color="#FFFFFF",
             corner_radius=6, padx=8, pady=2
@@ -363,7 +371,7 @@ class DiscordDNSApp(ctk.CTk):
         if info.get("is_superonline") or info.get("is_ttnet"):
             self.channel_seg.set("⚡ Kanal 3: DPI Bypass")
             self.active_channel = "Kanal 3: DPI Bypass"
-        elif info.get("is_vodafone"):
+        elif "DoH" in info.get("recommended_channel", ""):
             self.channel_seg.set("🔒 Kanal 2: DoH Şifreli")
             self.active_channel = "Kanal 2: DoH Şifreli"
 
@@ -672,7 +680,7 @@ class DiscordDNSApp(ctk.CTk):
         # Options Row (DoH Checkbox + Auto restore Checkbox)
         self.doh_chk = ctk.CTkCheckBox(
             frame,
-            text="🔒 DoH (DNS-over-HTTPS) Şifrelemeyi Etkinleştir (Windows 11)",
+            text="🔒 Şifreli DNS (yerel DoH çözümleyici — Windows 10/11)",
             variable=self.doh_enabled_var,
             font=ctk.CTkFont(family="Segoe UI Variable", size=11),
             text_color=CYAN,
@@ -848,6 +856,24 @@ class DiscordDNSApp(ctk.CTk):
         btn_frame.grid(row=0, column=1, sticky="e")
 
         ctk.CTkButton(
+            btn_frame, text="🎯 Strateji Bul",
+            font=ctk.CTkFont(family="Segoe UI Variable", size=11, weight="bold"),
+            fg_color=SURFACE, hover_color=BORDER,
+            text_color=GOLD,
+            height=26, width=105, corner_radius=6,
+            command=self.run_strategy_finder
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            btn_frame, text="🔬 Test & Kanıtla",
+            font=ctk.CTkFont(family="Segoe UI Variable", size=11, weight="bold"),
+            fg_color=SURFACE, hover_color=BORDER,
+            text_color=CYAN,
+            height=26, width=120, corner_radius=6,
+            command=self.open_diagnostics
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
             btn_frame, text="💾 Kaydet",
             font=ctk.CTkFont(family="Segoe UI Variable", size=11),
             fg_color=SURFACE, hover_color=BORDER,
@@ -913,7 +939,7 @@ class DiscordDNSApp(ctk.CTk):
             return
         img = _load_tray_icon()
         menu = pystray.Menu(
-            TrayItem("Discord DNS v3.0", lambda: None, enabled=False),
+            TrayItem("Discord DNS v3.6", lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
             TrayItem("Pencereyi Aç / Göster",  self._tray_show_window),
             TrayItem("DNS Durumunu Yenile",    lambda i, item: self.after(0, self.refresh_status)),
@@ -921,13 +947,44 @@ class DiscordDNSApp(ctk.CTk):
             pystray.Menu.SEPARATOR,
             TrayItem("Çıkış",                  self._tray_exit),
         )
-        self._tray_icon = pystray.Icon("DiscordDNS", img, "Discord DNS v3.0 — Çalışıyor", menu)
+        self._tray_icon = pystray.Icon("DiscordDNS", img, "Discord DNS v3.6 — Koruma kapalı", menu)
         threading.Thread(target=self._tray_icon.run, daemon=True).start()
+        self._refresh_tray_tooltip()
+
+    def _refresh_tray_tooltip(self):
+        """
+        Keep the hover text honest — Windows 11 usually tucks new tray icons into
+        the overflow area, so the tooltip is often the only status the user sees
+        without opening the window.
+        """
+        if not self._tray_icon:
+            return
+        parts = []
+        if doh_proxy.is_running():
+            parts.append("🔒 Şifreli DNS")
+        engine = dpi_bypass.active_engine()
+        if engine:
+            parts.append("⚡ DPI motoru")
+        if not parts and self.user_dns_enabled and self.dns_state and not self.dns_state.get("is_dhcp"):
+            parts.append(f"🟢 {self.dns_state.get('preset_name', 'DNS')}")
+        status = " · ".join(parts) if parts else "Koruma kapalı"
+        try:
+            self._tray_icon.title = f"Discord DNS v3.6 — {status}"
+        except Exception:
+            pass
 
     def _minimize_to_tray(self):
-        """Called when user clicks X — hides window but keeps app running in tray."""
-        self.withdraw()  # Hide window
-        # Tray is already running, no need to restart it
+        """X only hides the window — the app (and DNS management) keeps running."""
+        self.withdraw()
+        if self._tray_icon and (self.user_dns_enabled or doh_proxy.is_running()):
+            try:
+                self._tray_icon.notify(
+                    "Uygulama tepside çalışmaya devam ediyor. DNS ayarlarınız hâlâ "
+                    "yönetiliyor — tamamen kapatmak için tepsi menüsünden Çıkış'ı seçin.",
+                    "Discord DNS arka planda"
+                )
+            except Exception:
+                pass
 
     def _tray_show_window(self, icon=None, item=None):
         """Restore the main window from tray."""
@@ -1122,16 +1179,17 @@ class DiscordDNSApp(ctk.CTk):
         if "Kanal 1" in choice:
             self.chan_desc_lbl.configure(text="🟢 Kanal 1: TürkNet ve engelsiz İSS'ler için hızlı Cloudflare DNS.")
         elif "Kanal 2" in choice:
-            self.chan_desc_lbl.configure(text="🔒 Kanal 2: DoH (DNS-over-HTTPS) -- İSS DNS hijacking müdahalelerini 443/TLS ile aşar.")
+            self.chan_desc_lbl.configure(text="🔒 Kanal 2: Yerel DoH çözümleyici -- tüm DNS sorguları 443/TLS üzerinden şifrelenir (Windows 10/11).")
         elif "Kanal 3" in choice:
-            self.chan_desc_lbl.configure(text="⚡ Kanal 3: Superonline & Türk Telekom DPI Bypass -- GoodbyeDPI tüneli ile SNI engellerini aşar.")
+            self.chan_desc_lbl.configure(text="⚡ Kanal 3: Yerel DPI motoru -- ClientHello'yu SNI içinden bölerek Superonline/TT engellerini aşar.")
         self.log(f"Kanal Değişti: {choice}")
         self._sync_action_button()
 
     def _sync_action_button(self):
         is_managed = self.user_dns_enabled and (
             (self.dns_state and not self.dns_state.get("is_dhcp")) or
-            dpi_bypass.is_dpi_bypass_running()
+            dpi_bypass.is_dpi_bypass_running() or
+            doh_proxy.is_running()
         )
         if is_managed:
             self.action_btn.configure(
@@ -1153,33 +1211,46 @@ class DiscordDNSApp(ctk.CTk):
 
         is_managed = self.user_dns_enabled and (
             (self.dns_state and not self.dns_state.get("is_dhcp")) or
-            dpi_bypass.is_dpi_bypass_running()
+            dpi_bypass.is_dpi_bypass_running() or
+            doh_proxy.is_running()
         )
         self.action_btn.configure(state="disabled", text="⏳  İşlem yapılıyor...")
         threading.Thread(target=self._do_toggle, args=(bool(is_managed),), daemon=True).start()
 
     def _do_toggle(self, is_managed):
         if is_managed:
-            ok, msg = dns_manager.reset_dns_to_dhcp(self.selected_adapter)
-            dpi_bypass.stop_dpi_bypass()
-            if os.path.exists(dns_manager.BACKUP_FILE):
-                try: os.remove(dns_manager.BACKUP_FILE)
-                except Exception: pass
-            label = "Orijinal DNS (DHCP) geri yüklendi ve DPI Tüneli kapatıldı"
+            # Give the user their own DNS servers back, not a blanket DHCP reset
+            msg = self._restore_original_dns()
+            _, dpi_msg = dpi_bypass.stop_dpi_bypass()
+            _, doh_msg = doh_proxy.stop()
+            msg += f"\n{dpi_msg}\n{doh_msg}"
+            ok = True
+            label = "Orijinal DNS ayarlarınız geri yüklendi, motorlar kapatıldı"
             is_enabling = False
         else:
-            enable_doh = "Kanal 2" in self.active_channel or self.doh_enabled_var.get()
-            ok, msg = dns_manager.set_preset_dns(
-                self.selected_adapter,
-                self.current_preset,
-                enable_doh=enable_doh
-            )
+            use_doh = "Kanal 2" in self.active_channel or self.doh_enabled_var.get()
 
-            # If Kanal 3 (DPI Bypass) selected, also launch GoodbyeDPI engine
+            if use_doh:
+                # Kanal 2: our own local DoH resolver. The adapter points at it,
+                # so every lookup on the machine leaves encrypted over 443/TLS.
+                doh_ok, doh_msg = doh_proxy.start(self.current_preset)
+                if doh_ok:
+                    ok, msg = dns_manager.set_local_resolver_dns(self.selected_adapter)
+                    msg = f"{doh_msg}\n{msg}"
+                else:
+                    # Falling back to plain DNS is better than leaving the user offline
+                    ok, msg = dns_manager.set_preset_dns(self.selected_adapter, self.current_preset)
+                    msg = f"{doh_msg}\n↪ Şifresiz {self.current_preset} DNS'e geçildi.\n{msg}"
+            else:
+                ok, msg = dns_manager.set_preset_dns(self.selected_adapter, self.current_preset)
+
+            # Kanal 3: our own WinDivert packet engine (no goodbyedpi.exe process)
             if "Kanal 3" in self.active_channel:
-                mode = "superonline" if self.isp_info.get("is_superonline") else ("ttnet" if self.isp_info.get("is_ttnet") else "general")
+                mode = dpi_bypass.resolve_mode(self.isp_info)
                 dpi_ok, dpi_msg = dpi_bypass.start_dpi_bypass(mode=mode)
                 msg += f"\n{dpi_msg}"
+                if not dpi_ok:
+                    ok = False
 
             label = f"{self.current_preset} DNS ({self.active_channel}) etkinleştirildi"
             is_enabling = True
@@ -1213,6 +1284,8 @@ class DiscordDNSApp(ctk.CTk):
     def _apply_refresh(self, dns, disc):
         now = datetime.datetime.now().strftime("%H:%M:%S")
         self.dns_state = dns
+        self._watchdog_check(dns)
+        self._refresh_tray_tooltip()
 
         v4 = ", ".join(dns.get("ipv4", [])) or "Otomatik (DHCP)"
         v6 = ", ".join(dns.get("ipv6", [])) or "Otomatik (DHCP)"
@@ -1265,8 +1338,27 @@ class DiscordDNSApp(ctk.CTk):
             self.bar_led.configure(text_color=RED)
             disc_short = "Kapalı"
 
-        self.bar_text.configure(text=f"{preset}  ·  Discord {disc_short}  ·  {self.selected_adapter}  ·  {now}")
+        self.bar_text.configure(
+            text=f"{preset}  ·  Discord {disc_short}  ·  {self.selected_adapter}  ·  {self._engine_summary()}  ·  {now}"
+        )
         self._sync_action_button()
+
+    def _engine_summary(self) -> str:
+        """One-line live state of the bypass engines for the status bar."""
+        parts = []
+
+        engine = dpi_bypass.active_engine()
+        if engine == dpi_bypass.ENGINE_NATIVE:
+            st = dpi_bypass.engine_stats()
+            parts.append(f"⚡ Yerel motor {st.get('packets_rewritten', 0)} paket")
+        elif engine == dpi_bypass.ENGINE_GOODBYEDPI:
+            parts.append("⚡ Yedek motor (goodbyedpi)")
+
+        if doh_proxy.is_running():
+            st = doh_proxy.stats()
+            parts.append(f"🔒 DoH {st.get('queries', 0)} sorgu")
+
+        return "  ·  ".join(parts) if parts else "Motor kapalı"
 
     def _schedule_auto_refresh(self):
         self.refresh_status()
@@ -1335,7 +1427,7 @@ class DiscordDNSApp(ctk.CTk):
     def show_info_dialog(self):
         """Open a detailed, dark-themed information & user guide window."""
         dialog = ctk.CTkToplevel(self)
-        dialog.title("ℹ Discord DNS v3.5 — Bilgi & Kullanım Rehberi")
+        dialog.title("ℹ Discord DNS v3.6 — Bilgi & Kullanım Rehberi")
         dialog.geometry("660x650")
         dialog.configure(fg_color="#0F111A")
         dialog.transient(self)
@@ -1355,7 +1447,7 @@ class DiscordDNSApp(ctk.CTk):
         hdr.pack(fill="x", padx=16, pady=(16, 8))
 
         ctk.CTkLabel(
-            hdr, text="⚡ Discord DNS v3.5 — Uygulama Rehberi & Bilgi",
+            hdr, text="⚡ Discord DNS v3.6 — Uygulama Rehberi & Bilgi",
             font=ctk.CTkFont(family="Segoe UI Variable Display", size=16, weight="bold"),
             text_color="#FFFFFF"
         ).pack(side="left", padx=16, pady=12)
@@ -1366,12 +1458,12 @@ class DiscordDNSApp(ctk.CTk):
 
         text_sections = [
             ("📌 Uygulama Ne İşe Yarar?",
-             "Discord DNS v3.5; Türkiye'deki internet servis sağlayıcılarının (İSS) Discord ve benzeri platformlara uyguladığı DNS Yönlendirmesi (DNS Hijacking), SNI Engellemesi ve Derin Paket İnceleme (DPI) kısıtlamalarını tek tıkla aşmanızı sağlayan akıllı bir tünelleme ve şifreli DNS yazılımıdır."),
+             "Discord DNS v3.6; Türkiye'deki internet servis sağlayıcılarının (İSS) Discord ve benzeri platformlara uyguladığı DNS Yönlendirmesi (DNS Hijacking), SNI Engellemesi ve Derin Paket İnceleme (DPI) kısıtlamalarını tek tıkla aşmanızı sağlayan akıllı bir tünelleme ve şifreli DNS yazılımıdır."),
 
             ("🔀 Hangi Kanalı Seçmeliyim? (Kim Nasıl Kullanmalı?)",
              "• 🟢 Kanal 1: Standart DNS (TürkNet & Engelsiz İSS'ler):\n  İSS'nizde ağır paket engellemesi yoksa Cloudflare (1.1.1.1) veya AdGuard ile en düşük ping değerini (10-15 ms) sunar.\n\n"
              "• 🔒 Kanal 2: DoH (DNS-over-HTTPS) Şifreli Mod:\n  İSS'niz varsayılan DNS sorgularınızı müdahale ile kendi sunucularına yönlendiriyorsa, sorguları 443/TLS portu üzerinden tam şifreleyerek engelleri aşar.\n\n"
-             "• ⚡ Kanal 3: DPI Bypass (Superonline & Türk Telekom Özel):\n  Superonline Fiber ve Türk Telekom altyapısındaki ağır SNI ve paket inceleme engellerini GoodbyeDPI paket bölme (TLS ClientHello fragmentation) algoritmasıyla %100 aşar."),
+             "• ⚡ Kanal 3: DPI Bypass (Superonline & Türk Telekom Özel):\n  Uygulamanın kendi WinDivert paket motoru; TLS ClientHello'yu SNI alan adının ortasından bölerek, sahte paket enjekte ederek ve segmentleri ters sırayla göndererek Superonline ve Türk Telekom SNI engellerini aşar. Harici goodbyedpi.exe gerekmez."),
 
             ("🚀 Nasıl Daha Verimli Kullanılır?",
              "1. Yönetici İzni: Ağ kartı DNS adreslerini değiştirmek ve tünel sürücüsünü çalıştırmak için uygulamayı 'Yönetici Olarak Çalıştır'ın.\n"
@@ -1458,24 +1550,202 @@ class DiscordDNSApp(ctk.CTk):
             messagebox.showerror("Yönetici Gerekli",
                                   "DNS değiştirmek için Yönetici olarak çalıştırın.")
 
+    # ═══════════════════════════════════════════════════════════════════════════════
+    #  DIAGNOSTICS & AUTOMATIC STRATEGY
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    def open_diagnostics(self):
+        """Collect a shareable diagnostic report and show it in its own window."""
+        window = ctk.CTkToplevel(self)
+        window.title("🔬 Test & Kanıtla — Tanılama Raporu")
+        window.geometry("760x620")
+        window.configure(fg_color=BG)
+        window.transient(self)
+
+        box = ctk.CTkTextbox(
+            window, fg_color=CONSOLE_BG, text_color=CYAN,
+            font=ctk.CTkFont(family="Cascadia Code", size=11),
+            corner_radius=10, border_width=1, border_color=BORDER
+        )
+        box.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+        box.insert("end", "Tanılama çalışıyor, lütfen bekleyin…\n\n")
+
+        bar = ctk.CTkFrame(window, fg_color="transparent")
+        bar.pack(fill="x", padx=16, pady=(0, 16))
+
+        def copy_report():
+            self.clipboard_clear()
+            self.clipboard_append(box.get("1.0", "end").strip())
+            self.log("📋 Tanılama raporu panoya kopyalandı.")
+
+        ctk.CTkButton(bar, text="📋 Panoya Kopyala", command=copy_report,
+                      fg_color=BLURPLE, hover_color=BLURPLE_DIM,
+                      height=32, corner_radius=8).pack(side="left")
+        ctk.CTkButton(bar, text="Kapat", command=window.destroy,
+                      fg_color=SURFACE, hover_color=BORDER, text_color=TEXT_MUTED,
+                      height=32, width=90, corner_radius=8).pack(side="right")
+
+        def worker():
+            def progress(message):
+                self.after(0, lambda: box.insert("end", f"  … {message}\n"))
+            try:
+                report = diagnostics.collect_report(on_progress=progress)
+            except Exception as e:
+                report = f"Tanılama başarısız: {e}"
+            self.after(0, lambda: (box.delete("1.0", "end"), box.insert("end", report)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def run_strategy_finder(self):
+        """Measure which bypass profile actually works on this line, then apply it."""
+        if not self.is_admin_user:
+            messagebox.showwarning(
+                "Yönetici Gerekli",
+                "Strateji taraması motoru açıp kapattığı için Yönetici yetkisi ister."
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Otomatik Strateji Bulucu",
+            "Uygulama, engel aşma profillerini tek tek deneyip bu hatta gerçekten "
+            "çalışanı bulacak.\n\nTarama sırasında bağlantınız birkaç kez kesilip "
+            "yeniden kurulabilir (yaklaşık 1-2 dakika).\n\nDevam edilsin mi?"
+        ):
+            return
+
+        self.log("🎯 Otomatik strateji taraması başlatıldı…")
+        threading.Thread(target=self._do_strategy_scan, daemon=True).start()
+
+    def _do_strategy_scan(self):
+        def progress(message):
+            self.after(0, self.log, message)
+
+        try:
+            report = strategy_finder.find_best_strategy(on_progress=progress)
+        except Exception as e:
+            self.after(0, self.log, f"✗ Strateji taraması başarısız: {e}")
+            return
+
+        self.after(0, self.log, f"🎯 {report.summary()}")
+
+        if report.best is not None:
+            ok, message = strategy_finder.apply_report(report)
+            self.after(0, self.log, message)
+            if ok:
+                self.after(0, self.channel_seg.set, "⚡ Kanal 3: DPI Bypass")
+                self.active_channel = "Kanal 3: DPI Bypass"
+        elif report.dns_hijack_suspected:
+            self.after(0, self.channel_seg.set, "🔒 Kanal 2: DoH Şifreli")
+            self.active_channel = "Kanal 2: DoH Şifreli"
+            self.after(0, self.log, "↪ Kanal 2 (şifreli DNS) seçildi — engel DNS katmanında.")
+
+        self.after(0, self.refresh_status)
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    #  SHUTDOWN & CRASH SAFETY
+    # ═══════════════════════════════════════════════════════════════════════════════
+
+    def _register_emergency_cleanup(self):
+        """
+        Make sure DNS is never left pointing at a resolver that is no longer
+        running. Closing the window is the happy path; Ctrl+C, a SIGTERM or an
+        unhandled exception used to skip cleanup entirely and leave the machine
+        with 127.0.0.1 and nothing listening on it — i.e. no DNS at all.
+        """
+        atexit.register(self._emergency_cleanup)
+        for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", signal.SIGTERM)):
+            try:
+                signal.signal(sig, self._on_termination_signal)
+            except (ValueError, OSError):
+                pass    # not the main thread, or unsupported on this platform
+
+        # Closing the console window (running `python main.py`) does not raise
+        # KeyboardInterrupt and skips atexit, so hook the Windows console events
+        # directly — this is the path that used to leave DNS pointing at a dead
+        # resolver.
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                handler_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
+
+                def _console_handler(event):
+                    if event in (0, 1, 2, 5, 6):   # C, BREAK, CLOSE, LOGOFF, SHUTDOWN
+                        self._emergency_cleanup()
+                    return False                   # let Windows continue closing
+
+                self._console_handler = handler_type(_console_handler)
+                ctypes.windll.kernel32.SetConsoleCtrlHandler(self._console_handler, True)
+            except Exception:
+                pass
+
+    def _on_termination_signal(self, signum, frame):
+        self._emergency_cleanup()
+        os._exit(0)
+
+    def _emergency_cleanup(self):
+        """Idempotent teardown, safe to call from a signal handler or atexit."""
+        if self._cleanup_done:
+            return
+        self._cleanup_done = True
+
+        for stop in (doh_proxy.stop, dpi_bypass.stop_dpi_bypass):
+            try:
+                stop()
+            except Exception:
+                pass
+
+        if not self.is_admin_user:
+            return
+        try:
+            self._restore_original_dns()
+        except Exception:
+            pass
+
+    def _restore_original_dns(self) -> str:
+        """
+        Hand DNS back exactly as we found it — the user's own servers, not DHCP.
+
+        The backup written when protection was switched on knows which adapter it
+        came from and whether that adapter was on DHCP, so restoring it returns
+        the machine to its real previous state. Anything still pointing at our
+        local resolver afterwards was ours too, and goes back to automatic.
+        """
+        messages = []
+
+        if os.path.exists(dns_manager.BACKUP_FILE):
+            ok, message = dns_manager.restore_original_dns()
+            messages.append(message)
+
+        for adapter in (self.adapters or ["Wi-Fi", "Ethernet"]):
+            state = dns_manager.get_current_dns(adapter)
+            if state.get("is_local_doh"):
+                _, message = dns_manager.reset_dns_to_dhcp(adapter)
+                messages.append(message)
+
+        return "\n".join(messages) or "DNS zaten orijinal durumdaydı."
+
+    def _watchdog_check(self, dns_state):
+        """
+        Called on every status refresh: if the adapter still points at the local
+        resolver while the resolver is gone, put DNS back before the user
+        notices they have no internet.
+        """
+        if not dns_state.get("is_local_doh") or doh_proxy.is_running():
+            return
+        self.log("⚠ Yerel DoH çözümleyici çalışmıyor ama DNS hâlâ 127.0.0.1'e bakıyor — geri alınıyor.")
+        if self.is_admin_user:
+            ok, msg = dns_manager.reset_dns_to_dhcp(self.selected_adapter)
+            self.log(msg)
+            self.user_dns_enabled = False
+
     def on_app_close(self):
-        """Full application shutdown — restores DNS, stops DPI tunnel, and terminates app completely."""
+        """Full application shutdown — restores DNS, stops the engines, exits."""
         # Stop heartbeat guard
         if self._guard:
             self._guard.stop()
 
-        # Stop DPI Bypass engine & WinDivert driver
-        dpi_bypass.stop_dpi_bypass()
-
-        # Reset DNS to Automatic (DHCP) on all active adapters
-        if self.is_admin_user:
-            for adp in (self.adapters or ["Wi-Fi", "Ethernet"]):
-                dns_manager.reset_dns_to_dhcp(adp)
-            if os.path.exists(dns_manager.BACKUP_FILE):
-                try:
-                    os.remove(dns_manager.BACKUP_FILE)
-                except Exception:
-                    pass
+        # Stops both engines and restores DNS (idempotent with the signal path)
+        self._emergency_cleanup()
 
         # Stop tray icon
         if self._tray_icon:

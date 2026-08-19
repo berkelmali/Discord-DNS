@@ -1,5 +1,5 @@
 """
-Discord DNS v3.5 — Discord Connectivity & Voice Region Checker
+Discord DNS v3.6 — Discord Connectivity & Voice Region Checker
 Provides TCP-based latency tests to Discord API endpoints and voice server regions.
 Uses Discord Voice Anycast endpoints & fallback IPs for 100% reliable latency measurement.
 """

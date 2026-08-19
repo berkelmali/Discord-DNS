@@ -31,7 +31,11 @@ def run_tests():
     elapsed = (time.time() - start_time) * 1000
     print(f"  ISP Name        : {isp_info.get('isp')}")
     print(f"  Organization    : {isp_info.get('org')}")
-    print(f"  Public IP       : {isp_info.get('ip')}")
+    # Diagnostic output often ends up pasted into public bug reports —
+    # show enough of the address to be useful, not enough to identify the user.
+    _ip = str(isp_info.get("ip") or "")
+    _masked = ".".join(_ip.split(".")[:2] + ["x", "x"]) if _ip.count(".") == 3 else "gizlendi"
+    print(f"  Public IP       : {_masked}  (gizlilik için maskelendi)")
     print(f"  Recommended Mode: {isp_info.get('recommended_channel')}")
     print(f"  Time Taken      : {int(elapsed)} ms")
 

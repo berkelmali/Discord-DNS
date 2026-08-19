@@ -1,5 +1,5 @@
 """
-Discord DNS v3.0 — Heartbeat Guard (Smart Failover)
+Discord DNS v3.6 — Heartbeat Guard (Smart Failover)
 Background daemon thread that monitors Discord connectivity every N seconds.
 If consecutive failures exceed the threshold, it triggers an automatic DNS failover
 to the next available preset without interrupting an active Discord voice session.
@@ -12,6 +12,7 @@ from typing import Callable, Optional
 
 import discord_checker
 import dns_manager
+import doh_proxy
 
 logger = logging.getLogger("HeartbeatGuard")
 
@@ -162,6 +163,24 @@ class HeartbeatGuard:
             return
 
         to_preset = FAILOVER_CHAIN[next_index]
+
+        # When the adapter points at the local DoH resolver, switching presets
+        # would replace 127.0.0.1 with a plaintext server and quietly turn the
+        # encryption off. Rotate the upstream provider instead.
+        if doh_proxy.is_running():
+            success, log_msg = doh_proxy.rotate_upstream()
+            logger.info("DoH failover: %s", log_msg)
+            self.current_preset_index = next_index
+            self.consecutive_failures = 0
+            self.on_status_change("failover", {
+                "from_preset": from_preset,
+                "to_preset":   to_preset,
+                "success":     success,
+                "reason":      "Şifreli DNS açık — sağlayıcı değiştirildi, ağ kartına dokunulmadı.",
+                "log":         log_msg,
+            })
+            return
+
         logger.info("Failover: %s → %s (adapter: %s)", from_preset, to_preset, self.adapter_name)
 
         success, log_msg = dns_manager.set_preset_dns(self.adapter_name, to_preset)

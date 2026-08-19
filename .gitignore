@@ -26,6 +26,15 @@ ENV/
 *.swp
 *.swo
 
-# Antigravity artifacts
-.agents/
-.gemini/
+# Runtime state & personal artifacts (never commit these)
+config.json
+original_dns_backup.json
+*dns_backup*.json
+DiscordDNS/
+bin/
+assets/goodbyedpi/
+assets/windivert/*.zip
+*.pcap
+*.pcapng
+diagnostic_*.txt
+system_log_*.txt

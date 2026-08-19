@@ -1,5 +1,5 @@
 """
-Discord DNS v3.0 — Entry Point
+Discord DNS v3.6 — Entry Point
 Auto-elevates to Administrator via UAC if required, then launches the GUI.
 """
 
