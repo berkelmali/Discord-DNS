@@ -1,5 +1,5 @@
 """
-Discord DNS v3.5 — DNS Manager
+Discord DNS v3.6 — DNS Manager
 Handles DNS read/write via PowerShell (primary) with netsh fallback.
 Includes DoH (DNS-over-HTTPS) encryption, socket optimization, and multi-preset management.
 All subprocess calls use CREATE_NO_WINDOW to prevent console flicker.
@@ -43,12 +43,16 @@ DNS_PRESETS = {
 
 # ─── Backup File Path ────────────────────────────────────────────────────────────
 
-def _get_backup_path() -> str:
-    """Return persistent backup path inside %APPDATA%\\DiscordDNS\\."""
+def _get_backup_dir() -> str:
+    """Return the persistent app data directory (%APPDATA%\\DiscordDNS\\)."""
     appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
     backup_dir = os.path.join(appdata, "DiscordDNS")
     os.makedirs(backup_dir, exist_ok=True)
-    return os.path.join(backup_dir, "original_dns_backup.json")
+    return backup_dir
+
+def _get_backup_path() -> str:
+    """Return persistent backup path inside %APPDATA%\\DiscordDNS\\."""
+    return os.path.join(_get_backup_dir(), "original_dns_backup.json")
 
 BACKUP_FILE = _get_backup_path()
 
@@ -138,6 +142,7 @@ def get_current_dns(adapter_name: str) -> dict:
         "is_opendns": False,
         "is_controld": False,
         "is_dhcp": True,
+        "is_local_doh": False,
         "preset_name": "DHCP",
         "doh_enabled": False,
     }
@@ -176,7 +181,12 @@ def get_current_dns(adapter_name: str) -> dict:
     res["is_controld"]   = has_cd
     res["is_dhcp"]       = not res["ipv4"] and not res["ipv6"]
 
-    if has_cf:
+    res["is_local_doh"] = LOCAL_RESOLVER_IPV4 in res["ipv4"] or LOCAL_RESOLVER_IPV6 in res["ipv6"]
+
+    if res["is_local_doh"]:
+        res["preset_name"] = "Yerel DoH"
+        res["doh_enabled"] = True
+    elif has_cf:
         res["preset_name"] = "Cloudflare"
     elif has_g:
         res["preset_name"] = "Google"
@@ -226,7 +236,10 @@ def restore_original_dns(adapter_name: str | None = None) -> tuple[bool, str]:
         with open(BACKUP_FILE, "r", encoding="utf-8") as f:
             backup = json.load(f)
 
-        target = adapter_name or backup.get("adapter_name", "Wi-Fi")
+        # Restore onto the adapter the backup was actually taken from. Using the
+        # caller's currently selected adapter could write one adapter's saved
+        # servers onto a different one (e.g. Ethernet's values onto Wi-Fi).
+        target = backup.get("adapter_name") or adapter_name or "Wi-Fi"
 
         if backup.get("is_dhcp", True):
             success, msg = reset_dns_to_dhcp(target)
@@ -291,11 +304,12 @@ def set_custom_dns(
         else:
             logs.append(f"IPv6 DNS: {', '.join(v6_servers)}")
 
-    # DoH Option (Windows 11)
+    # NOTE: the old code ran `Set-DnsClientServerAddress -DnsOverHttps Allow`,
+    # which is not a real parameter — the call always failed and the app reported
+    # "DoH enabled" anyway. Encryption is now provided by the local resolver in
+    # doh_proxy.py (see set_local_resolver_dns), which works on Windows 10 too.
     if enable_doh:
-        doh_cmd = f'Set-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -DnsOverHttps Allow'
-        run_powershell(doh_cmd)
-        logs.append("DoH (DNS-over-HTTPS) Şifreleme Etkinleştirildi 🔒")
+        logs.append("Şifreleme için yerel DoH çözümleyici (Kanal 2) kullanılır.")
 
     flush_res = optimize_dns_sockets()
     logs.append(flush_res)
@@ -309,6 +323,59 @@ def set_preset_dns(adapter_name: str, preset_name: str, enable_doh: bool = False
     backup_original_dns(adapter_name)
     v4, v6 = DNS_PRESETS[preset_name]
     return set_custom_dns(adapter_name, v4[0], v4[1], v6[0], v6[1], enable_doh=enable_doh)
+
+LOCAL_RESOLVER_IPV4 = "127.0.0.1"
+LOCAL_RESOLVER_IPV6 = "::1"
+
+def set_local_resolver_dns(adapter_name: str, safety_net: bool = True) -> tuple[bool, str]:
+    """
+    Point the adapter at the local DoH resolver (doh_proxy.py).
+
+    Both address families are set: leaving the DHCP-supplied IPv6 resolver in
+    place would let Windows resolve over plaintext IPv6 DNS and walk around the
+    encrypted path entirely.
+
+    `safety_net` adds Cloudflare as a *secondary* server. Windows only consults
+    it when 127.0.0.1 stops answering — precisely the case where the app was
+    killed (Ctrl+C, Task Manager, crash) and the machine would otherwise be left
+    with no working DNS at all. Normal lookups still go to the encrypted
+    resolver first.
+    """
+    backup_original_dns(adapter_name)
+    logs = []
+
+    v4 = [LOCAL_RESOLVER_IPV4] + ([CLOUDFLARE_IPV4[0]] if safety_net else [])
+    v6 = [LOCAL_RESOLVER_IPV6] + ([CLOUDFLARE_IPV6[0]] if safety_net else [])
+
+    v4_str = ",".join(f'"{s}"' for s in v4)
+    out_v4 = run_powershell(
+        f'Set-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -ServerAddresses ({v4_str})'
+    )
+    if out_v4.startswith("ERROR"):
+        run_cmd(f'netsh interface ipv4 set dns name="{adapter_name}" static {v4[0]}')
+        for index, extra in enumerate(v4[1:], start=2):
+            run_cmd(f'netsh interface ipv4 add dns name="{adapter_name}" {extra} index={index}')
+        logs.append(f"IPv4 DNS (netsh) → {', '.join(v4)}")
+    else:
+        logs.append(f"IPv4 DNS → {', '.join(v4)} (yerel DoH)")
+
+    both_str = ",".join(f'"{s}"' for s in v4 + v6)
+    out_v6 = run_powershell(
+        f'Set-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -ServerAddresses ({both_str})'
+    )
+    if out_v6.startswith("ERROR"):
+        run_cmd(f'netsh interface ipv6 set dns name="{adapter_name}" static {v6[0]}')
+        for index, extra in enumerate(v6[1:], start=2):
+            run_cmd(f'netsh interface ipv6 add dns name="{adapter_name}" {extra} index={index}')
+        logs.append(f"IPv6 DNS (netsh) → {', '.join(v6)}")
+    else:
+        logs.append(f"IPv6 DNS → {', '.join(v6)}")
+
+    if safety_net:
+        logs.append("Güvenlik ağı: yerel çözümleyici susarsa Windows Cloudflare'a düşer.")
+
+    logs.append(optimize_dns_sockets())
+    return True, "\n".join(logs)
 
 def reset_dns_to_dhcp(adapter_name: str) -> tuple[bool, str]:
     """Reset DNS to Automatic (DHCP) on the given adapter."""

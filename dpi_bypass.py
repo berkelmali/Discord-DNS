@@ -1,12 +1,23 @@
 """
-Discord DNS v3.5 — DPI Bypass Engine & ISP Auto-Detector
-Provides deep packet inspection (DPI) bypass, SNI fragmenting, and DoH tunneling
-specifically tailored for non-TurkNet Turkish ISPs (Superonline, Türk Telekom, Vodafone).
+Discord DNS v3.6 — DPI Bypass Facade & ISP Auto-Detector
+
+The bypass itself is now ours: dpi_engine.py drives WinDivert directly, so no
+external goodbyedpi.exe process is downloaded or launched in the normal path.
+The legacy GoodbyeDPI launcher is kept only as an opt-in fallback for machines
+where our engine cannot open the driver.
+
+Public API (unchanged for gui.py):
+    detect_isp() -> dict
+    start_dpi_bypass(mode) -> (ok, message)
+    stop_dpi_bypass() -> (ok, message)
+    is_dpi_bypass_running() -> bool
 """
 
 import os
+import re
 import sys
 import json
+import time
 import subprocess
 import urllib.request
 import zipfile
@@ -14,9 +25,14 @@ import shutil
 import logging
 from typing import Optional, Tuple, Dict, Any
 
+import dpi_engine
+
 logger = logging.getLogger("DPIBypass")
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
+
+ENGINE_NATIVE = "native"
+ENGINE_GOODBYEDPI = "goodbyedpi"
 
 # ─── APPDATA STORAGE ──────────────────────────────────────────────────────────────
 
@@ -29,21 +45,71 @@ def _get_bin_dir() -> str:
 BIN_DIR = _get_bin_dir()
 GOODBYEDPI_EXE = os.path.join(BIN_DIR, "goodbyedpi.exe")
 
-# GoodbyeDPI download source (v0.2.2 stable release binary)
+# GoodbyeDPI download source (fallback engine only)
 GOODBYEDPI_ZIP_URL = "https://github.com/ValdikSS/GoodbyeDPI/releases/download/0.2.2/goodbyedpi-0.2.2.zip"
 
-# Global process handle
+# State of whichever engine is currently active
 _dpi_process: Optional[subprocess.Popen] = None
+_active_engine: Optional[str] = None
 
 
 # ─── ISP AUTO DETECTION ───────────────────────────────────────────────────────────
+
+# Word-boundary patterns: plain substrings used to misfire (e.g. "sol" matched
+# any "…Solutions" ISP and mislabelled it as Superonline).
+_ISP_PATTERNS = (
+    ("turknet",     r"\bturk\s*net\b|\bturknet\b"),
+    ("superonline", r"\bsuperonline\b|\bturkcell\b"),
+    ("ttnet",       r"\bt(?:ü|u)rk\s*telekom\b|\bttnet\b|\btt-?net\b"),
+    ("vodafone",    r"\bvodafone\b"),
+    ("kablonet",    r"\bkablonet\b|\bkablo\s*net\b|\bturksat\b"),
+    ("millenicom",  r"\bmillenicom\b"),
+)
+
+_ISP_PROFILES: Dict[str, Dict[str, str]] = {
+    "turknet": {
+        # TurkNet does not appear to do SNI-level blocking, but its resolver does
+        # answer blocked domains with the national block server instead of the
+        # real address (verifiable with: nslookup discord.com <ISS DNS>).
+        # Encrypted DNS — not a DPI strategy — is what fixes that.
+        "channel": "DoH Şifreli DNS",
+        "text": "TurkNet -- DNS yönlendirmesi var (discord.com engel sunucusuna gidiyor). Şifreli DoH ÖNERİLİR!",
+        "mode": "general",
+    },
+    "superonline": {
+        "channel": "Superonline DPI Bypass",
+        "text": "Superonline/Turkcell -- Ağır DPI & SNI engeli var. DPI Bypass Kanalı ÖNERİLİR!",
+        "mode": "superonline",
+    },
+    "ttnet": {
+        "channel": "Türk Telekom DPI Bypass",
+        "text": "Türk Telekom -- SNI & DNS Yönlendirmesi var. DoH + DPI Bypass ÖNERİLİR!",
+        "mode": "ttnet",
+    },
+    "vodafone": {
+        "channel": "DoH Şifreli DNS",
+        "text": "Vodafone -- DNS Hijacking var. DoH Şifreli DNS ÖNERİLİR!",
+        "mode": "vodafone",
+    },
+    "kablonet": {
+        "channel": "DoH Şifreli DNS",
+        "text": "KabloNet/Türksat -- DNS müdahalesi var. DoH Şifreli DNS önerilir.",
+        "mode": "vodafone",
+    },
+    "millenicom": {
+        "channel": "Standart DNS",
+        "text": "Millenicom -- Genelde engelsiz. Standart DNS yeterlidir.",
+        "mode": "general",
+    },
+}
+
 
 def detect_isp() -> Dict[str, Any]:
     """
     Detect the user's active Internet Service Provider (ISP).
     Returns dict with ISP name, organization, and recommended bypass mode.
     """
-    info = {
+    info: Dict[str, Any] = {
         "isp": "Bilinmiyor",
         "org": "",
         "as": "",
@@ -52,76 +118,87 @@ def detect_isp() -> Dict[str, Any]:
         "is_superonline": False,
         "is_ttnet": False,
         "is_vodafone": False,
-        "recommended_channel": "Standart DNS",
-        "recommendation_text": "TürkNet bağlantısı tespit edildi. Standart DNS yeterlidir.",
+        "is_kablonet": False,
+        "bypass_mode": "general",
+        "recommended_channel": "DoH Şifreli DNS",
+        "recommendation_text": "İSS tespit edilemedi. DoH veya DPI Bypass kanalı önerilir.",
     }
 
-    try:
-        req = urllib.request.Request("http://ip-api.com/json", headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=4) as res:
-            data = json.loads(res.read().decode("utf-8"))
-            info["isp"] = data.get("isp", "Bilinmiyor")
-            info["org"] = data.get("org", "")
-            info["as"]  = data.get("as", "")
-            info["ip"]  = data.get("query", "")
-    except Exception:
+    for url, mapping in (
+        ("http://ip-api.com/json", {"isp": "isp", "org": "org", "as": "as", "ip": "query"}),
+        ("https://ipinfo.io/json", {"isp": "org", "org": "org", "ip": "ip"}),
+    ):
         try:
-            req = urllib.request.Request("https://ipinfo.io/json", headers={"User-Agent": "Mozilla/5.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=4) as res:
                 data = json.loads(res.read().decode("utf-8"))
-                info["isp"] = data.get("org", "Bilinmiyor")
-                info["org"] = data.get("org", "")
-                info["ip"]  = data.get("ip", "")
+            for key, source in mapping.items():
+                info[key] = data.get(source, info.get(key, ""))
+            if info["isp"]:
+                break
         except Exception:
-            pass
+            continue
 
     full_str = f"{info['isp']} {info['org']} {info['as']}".lower()
 
-    if "turknet" in full_str:
-        info["is_turknet"] = True
-        info["recommended_channel"] = "Standart DNS"
-        info["recommendation_text"] = "TurkNet -- Engelleme yok. Standart Cloudflare DNS önerilir."
-    elif "superonline" in full_str or "sol" in full_str:
-        info["is_superonline"] = True
-        info["recommended_channel"] = "Superonline DPI Bypass"
-        info["recommendation_text"] = "Superonline -- Ağır DPI & SNI engeli var. DPI Bypass Kanalı ÖNERİLİR!"
-    elif "turk telekom" in full_str or "ttnet" in full_str or "tt-net" in full_str:
-        info["is_ttnet"] = True
-        info["recommended_channel"] = "Türk Telekom DPI Bypass"
-        info["recommendation_text"] = "Türk Telekom -- SNI & DNS Yönlendirmesi var. DoH + DPI Bypass ÖNERİLİR!"
-    elif "vodafone" in full_str:
-        info["is_vodafone"] = True
-        info["recommended_channel"] = "DoH Şifreli DNS"
-        info["recommendation_text"] = "Vodafone -- DNS Hijacking var. DoH Şifreli DNS ÖNERİLİR!"
+    matched = None
+    for key, pattern in _ISP_PATTERNS:
+        if re.search(pattern, full_str):
+            matched = key
+            break
+
+    if matched:
+        info[f"is_{matched}"] = True
+        profile = _ISP_PROFILES[matched]
+        info["recommended_channel"] = profile["channel"]
+        info["recommendation_text"] = profile["text"]
+        info["bypass_mode"] = profile["mode"]
     else:
-        info["recommended_channel"] = "DoH Şifreli DNS"
         info["recommendation_text"] = f"İSS: {info['isp']} -- DoH veya DPI Bypass kanalı önerilir."
 
     return info
 
 
-# ─── GOODBYEDPI INSTALLER ─────────────────────────────────────────────────────────
+def resolve_mode(isp_info: Optional[Dict[str, Any]]) -> str:
+    """Pick the dpi_engine preset that fits a detect_isp() result."""
+    if not isp_info:
+        return "general"
+    mode = isp_info.get("bypass_mode")
+    if mode in dpi_engine.PRESETS:
+        return mode
+    if isp_info.get("is_superonline"):
+        return "superonline"
+    if isp_info.get("is_ttnet"):
+        return "ttnet"
+    if isp_info.get("is_vodafone") or isp_info.get("is_kablonet"):
+        return "vodafone"
+    return "general"
+
+
+# ─── LEGACY GOODBYEDPI INSTALLER (fallback engine) ───────────────────────────────
+
+def _preferred_arch_dirs() -> Tuple[str, ...]:
+    return ("x86_64", "amd64", "x64") if sys.maxsize > 2 ** 32 else ("x86",)
+
 
 def ensure_goodbyedpi_installed() -> Tuple[bool, str]:
-    """Ensure goodbyedpi.exe and WinDivert binaries exist in BIN_DIR."""
+    """Ensure goodbyedpi.exe and its WinDivert binaries exist in BIN_DIR."""
     if os.path.exists(GOODBYEDPI_EXE):
         return True, "GoodbyeDPI hazır."
 
-    # Check if bundled in assets/goodbyedpi/
+    # Bundled copy in assets/goodbyedpi/ takes priority over any download
     _base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     assets_gb = os.path.join(_base, "assets", "goodbyedpi")
     if os.path.exists(os.path.join(assets_gb, "goodbyedpi.exe")):
         try:
             for item in os.listdir(assets_gb):
                 s = os.path.join(assets_gb, item)
-                d = os.path.join(BIN_DIR, item)
                 if os.path.isfile(s):
-                    shutil.copy2(s, d)
+                    shutil.copy2(s, os.path.join(BIN_DIR, item))
             return True, "GoodbyeDPI yerel paketten kopyalandı."
         except Exception as e:
             logger.warning("Local copy failed: %s", e)
 
-    # Download from GitHub release
     try:
         zip_path = os.path.join(BIN_DIR, "gbdpi.zip")
         req = urllib.request.Request(GOODBYEDPI_ZIP_URL, headers={"User-Agent": "Mozilla/5.0"})
@@ -130,18 +207,25 @@ def ensure_goodbyedpi_installed() -> Tuple[bool, str]:
 
         with zipfile.ZipFile(zip_path, "r") as zip_ref:
             zip_ref.extractall(BIN_DIR)
-
         os.remove(zip_path)
 
-        # Move files from x86_64 subfolder if present
+        # Pick the folder matching *this* machine's architecture. Walking blindly
+        # used to land on x86/ first and install the 32-bit build on 64-bit Windows.
+        source_dir = None
         for root, dirs, files in os.walk(BIN_DIR):
-            if "goodbyedpi.exe" in files:
-                for f in files:
-                    src = os.path.join(root, f)
-                    dst = os.path.join(BIN_DIR, f)
-                    if src != dst:
-                        shutil.copy2(src, dst)
+            if "goodbyedpi.exe" not in files:
+                continue
+            if os.path.basename(root).lower() in _preferred_arch_dirs():
+                source_dir = root
                 break
+            source_dir = source_dir or root
+
+        if source_dir:
+            for f in os.listdir(source_dir):
+                src = os.path.join(source_dir, f)
+                dst = os.path.join(BIN_DIR, f)
+                if os.path.isfile(src) and src != dst:
+                    shutil.copy2(src, dst)
 
         if os.path.exists(GOODBYEDPI_EXE):
             return True, "GoodbyeDPI indirme ve kurulumu tamamlandı [OK]"
@@ -150,107 +234,161 @@ def ensure_goodbyedpi_installed() -> Tuple[bool, str]:
         return False, f"GoodbyeDPI indirilemedi: {e}"
 
 
-# ─── DPI BYPASS ENGINE ────────────────────────────────────────────────────────────
+def _goodbyedpi_args(mode: str) -> Tuple[list, str]:
+    if mode == "superonline":
+        return ([GOODBYEDPI_EXE, "-9", "--set-ttl", "3",
+                 "--dns-addr", "1.1.1.1", "--dns-port", "53",
+                 "--dnsv6-addr", "2606:4700:4700::1111", "--dnsv6-port", "53"],
+                "Superonline DPI Bypass (GoodbyeDPI -9 + TTL 3)")
+    if mode == "ttnet":
+        return ([GOODBYEDPI_EXE, "-5", "--set-ttl", "3",
+                 "--dns-addr", "1.1.1.1", "--dns-port", "53"],
+                "Türk Telekom DPI Bypass (GoodbyeDPI -5)")
+    return ([GOODBYEDPI_EXE, "-7", "--dns-addr", "1.1.1.1", "--dns-port", "53"],
+            "Genel DPI Bypass (GoodbyeDPI -7)")
 
-def start_dpi_bypass(mode: str = "superonline") -> Tuple[bool, str]:
-    """
-    Start GoodbyeDPI process silently with ISP-specific parameters.
-    Modes: "superonline", "ttnet", "vodafone", "general"
-    """
-    global _dpi_process
 
-    stop_dpi_bypass()  # Ensure previous process is terminated
+def _start_goodbyedpi(mode: str) -> Tuple[bool, str]:
+    """Fallback path: launch the external GoodbyeDPI process."""
+    global _dpi_process, _active_engine
 
     ok, msg = ensure_goodbyedpi_installed()
     if not ok:
         return False, msg
 
-    # Select parameters based on target ISP mode
-    if mode == "superonline":
-        # Superonline Fiber: -9 (aggressive fragment), --set-ttl 3, Cloudflare DNS
-        cmd_args = [
-            GOODBYEDPI_EXE,
-            "-9",
-            "--set-ttl", "3",
-            "--dns-addr", "1.1.1.1",
-            "--dns-port", "53",
-            "--dnsv6-addr", "2606:4700:4700::1111",
-            "--dnsv6-port", "53",
-        ]
-        label = "Superonline DPI Bypass (Mod -9 + TTL 3)"
-    elif mode == "ttnet":
-        # Türk Telekom: -5 (HTTP/HTTPS split), --set-ttl 3
-        cmd_args = [
-            GOODBYEDPI_EXE,
-            "-5",
-            "--set-ttl", "3",
-            "--dns-addr", "1.1.1.1",
-            "--dns-port", "53",
-        ]
-        label = "Türk Telekom DPI Bypass (Mod -5)"
-    else:
-        # General / Vodafone: -7
-        cmd_args = [
-            GOODBYEDPI_EXE,
-            "-7",
-            "--dns-addr", "1.1.1.1",
-            "--dns-port", "53",
-        ]
-        label = "Genel DPI Bypass (Mod -7)"
-
+    cmd_args, label = _goodbyedpi_args(mode)
     try:
         _dpi_process = subprocess.Popen(
-            cmd_args,
-            cwd=BIN_DIR,
-            creationflags=CREATE_NO_WINDOW
+            cmd_args, cwd=BIN_DIR, creationflags=CREATE_NO_WINDOW,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
-        return True, f"⚡ {label} Başlatıldı! (PID: {_dpi_process.pid})"
     except Exception as e:
         return False, f"DPI Bypass başlatılamadı: {e}"
 
+    # GoodbyeDPI exits immediately when the driver refuses to load, and the old
+    # code reported success anyway. Confirm it is still alive before claiming so.
+    time.sleep(1.0)
+    if _dpi_process.poll() is not None:
+        output = ""
+        try:
+            output = (_dpi_process.stdout.read() or b"").decode("utf-8", "replace").strip()
+        except Exception:
+            pass
+        code = _dpi_process.returncode
+        _dpi_process = None
+        return False, f"GoodbyeDPI hemen kapandı (çıkış kodu {code}). {output[:200]}"
+
+    _active_engine = ENGINE_GOODBYEDPI
+    return True, f"⚡ {label} başlatıldı (PID: {_dpi_process.pid})"
+
+
+# ─── DPI BYPASS ENGINE (public) ──────────────────────────────────────────────────
+
+def start_dpi_bypass(mode: str = "superonline", allow_fallback: bool = True) -> Tuple[bool, str]:
+    """
+    Start the bypass. Uses our own WinDivert engine; only if that cannot open the
+    driver does it fall back to the bundled/downloaded GoodbyeDPI process.
+    Modes: "superonline", "ttnet", "vodafone", "general", "discord_only".
+    """
+    global _active_engine
+
+    stop_dpi_bypass()
+
+    ok, msg = dpi_engine.start(mode)
+    if ok:
+        _active_engine = ENGINE_NATIVE
+        return True, msg
+
+    logger.warning("Yerel motor başarısız: %s", msg)
+    if not allow_fallback:
+        return False, msg
+
+    fb_ok, fb_msg = _start_goodbyedpi(mode)
+    if fb_ok:
+        return True, f"{msg}\n↪ Yedek motora geçildi: {fb_msg}"
+    return False, f"{msg}\n↪ Yedek motor da başlatılamadı: {fb_msg}"
+
 
 def stop_dpi_bypass() -> Tuple[bool, str]:
-    """Stop the running GoodbyeDPI process and clean up WinDivert service."""
-    global _dpi_process
+    """Stop whichever engine is active and release the WinDivert driver."""
+    global _dpi_process, _active_engine
 
-    stopped = False
+    messages = []
 
-    if _dpi_process:
+    if dpi_engine.is_running():
+        _, msg = dpi_engine.stop()
+        messages.append(msg)
+    else:
+        dpi_engine.stop()
+
+    used_goodbyedpi = _active_engine == ENGINE_GOODBYEDPI or _dpi_process is not None
+
+    if _dpi_process is not None:
         try:
             _dpi_process.terminate()
             _dpi_process.wait(timeout=3)
-            stopped = True
         except Exception:
             try:
                 _dpi_process.kill()
-                stopped = True
             except Exception:
                 pass
         _dpi_process = None
 
-    # Kill any dangling goodbyedpi processes & clean WinDivert driver
-    try:
-        subprocess.run(["taskkill", "/F", "/IM", "goodbyedpi.exe"], capture_output=True, creationflags=CREATE_NO_WINDOW)
-        subprocess.run(["sc", "stop", "WinDivert"], capture_output=True, creationflags=CREATE_NO_WINDOW)
-        subprocess.run(["sc", "delete", "WinDivert"], capture_output=True, creationflags=CREATE_NO_WINDOW)
-        subprocess.run(["sc", "stop", "WinDivert14"], capture_output=True, creationflags=CREATE_NO_WINDOW)
-        subprocess.run(["sc", "delete", "WinDivert14"], capture_output=True, creationflags=CREATE_NO_WINDOW)
-        stopped = True
-    except Exception:
-        pass
+    if used_goodbyedpi or _goodbyedpi_process_alive():
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "goodbyedpi.exe"],
+                           capture_output=True, creationflags=CREATE_NO_WINDOW)
+        except Exception:
+            pass
+        # Only the legacy 1.4 driver GoodbyeDPI installs is torn down here. The
+        # 2.2 driver our engine uses unloads itself when the last handle closes,
+        # and force-deleting the shared service would break other running tools.
+        for service in ("WinDivert1.4", "WinDivert14"):
+            try:
+                subprocess.run(["sc", "stop", service], capture_output=True,
+                               creationflags=CREATE_NO_WINDOW)
+                subprocess.run(["sc", "delete", service], capture_output=True,
+                               creationflags=CREATE_NO_WINDOW)
+            except Exception:
+                pass
+        messages.append("GoodbyeDPI süreci ve eski WinDivert sürücüsü temizlendi.")
 
-    return True, "DPI Bypass Servisi Durduruldu ve Temizlendi [OK]"
+    _active_engine = None
+    return True, "\n".join(messages) or "DPI Bypass servisi kapalı [OK]"
+
+
+def _goodbyedpi_process_alive() -> bool:
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq goodbyedpi.exe"],
+                             capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
+        return "goodbyedpi.exe" in (out.stdout or "").lower()
+    except Exception:
+        return False
 
 
 def is_dpi_bypass_running() -> bool:
-    """Return True if GoodbyeDPI is currently running."""
-    global _dpi_process
-    if _dpi_process and _dpi_process.poll() is None:
+    """True when either the native engine or the fallback process is active."""
+    if dpi_engine.is_running():
         return True
+    if _dpi_process is not None and _dpi_process.poll() is None:
+        return True
+    return _goodbyedpi_process_alive()
 
-    # Check process list via tasklist
-    try:
-        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq goodbyedpi.exe"], capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
-        return "goodbyedpi.exe" in out.stdout.lower()
-    except Exception:
-        return False
+
+def active_engine() -> Optional[str]:
+    """Which engine is currently carrying traffic: "native", "goodbyedpi" or None."""
+    if dpi_engine.is_running():
+        return ENGINE_NATIVE
+    if is_dpi_bypass_running():
+        return ENGINE_GOODBYEDPI
+    return None
+
+
+def engine_stats() -> dict:
+    """Live counters from the native engine (empty dict for the fallback)."""
+    return dpi_engine.stats() if dpi_engine.is_running() else {}
+
+
+def self_test() -> Tuple[bool, str]:
+    """Check whether the native engine can open the WinDivert driver here."""
+    return dpi_engine.self_test()
