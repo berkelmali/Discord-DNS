@@ -22,8 +22,10 @@ if hasattr(sys.stdout, "reconfigure"):
 import admin_utils
 import dns_manager
 import doh_proxy
+import diagnostics
 import dpi_bypass
 import dpi_engine
+import strategy_finder
 import windivert
 
 TEST_HOSTS = ("discord.com", "gateway.discord.gg", "cloudflare.com")
@@ -70,50 +72,80 @@ def main() -> int:
         print("  Sürücü açılamadığı için motor testleri atlanıyor.")
         return 1
 
-    section("[2/6] Baseline (motor kapalıyken TLS)")
-    baseline = {}
-    hijack_suspects = []
-    for host in TEST_HOSTS:
-        good, ms, info = tls_handshake(host)
-        baseline[host] = good
-        print(f"  {host:22s} {'OK ' if good else 'FAIL'} {ms:7.0f} ms  {info}")
-        if not good and "CERTIFICATE_VERIFY_FAILED" in info:
-            hijack_suspects.append(host)
+    section("[2/6] Engel teşhisi (katman katman)")
+    verdict = diagnostics.classify_block("discord.com")
+    print(f"  Engel türü : {verdict['kind']}")
+    print(f"  Açıklama   : {verdict['message']}")
+    for item in verdict.get("evidence", []):
+        print(f"    · {item}")
 
-    if hijack_suspects:
-        print("\n  ! Sertifika doğrulaması başarısız: " + ", ".join(hijack_suspects))
-        print("    Bu, motorun değil İSS'nin sorunudur — DNS yanıtı sahte bir IP'ye")
-        print("    yönlendiriliyor (DNS hijacking). Çözümü Kanal 2 (yerel DoH).")
+    # Probes resolve over HTTPS, so a hijacked DNS cannot mask what the DPI does
+    baseline = {}
+    print("\n  Motor kapalıyken (şifreli DNS ile çözülmüş gerçek adreslere):")
+    for host in TEST_HOSTS:
+        result = strategy_finder.probe_host(host)
+        baseline[host] = result.ok
+        print(f"    {host:22s} {'OK  ' if result.ok else 'FAIL'} {result.ms:6.0f} ms  {result.diagnosis}")
+
+    blocked_hosts = [h for h, ok in baseline.items() if not ok]
 
     section("[3/6] Yerel DPI motoru")
-    mode = dpi_bypass.resolve_mode(dpi_bypass.detect_isp())
+    isp = dpi_bypass.detect_isp()
+    mode = dpi_bypass.resolve_mode(isp)
+    print(f"  İSS              : {isp.get('isp')}")
     print(f"  Seçilen strateji : {mode} ({dpi_engine.PRESETS[mode].name})")
     ok, msg = dpi_bypass.start_dpi_bypass(mode=mode)
     print(f"  Başlatma         : {'OK' if ok else 'BAŞARISIZ'} — {msg}")
+
+    engine_fixed_it = False
     if not ok:
         failures += 1
     else:
         print(f"  Aktif motor      : {dpi_bypass.active_engine()}")
         time.sleep(0.5)
+        still_blocked = []
         for host in TEST_HOSTS:
-            good, ms, info = tls_handshake(host)
-            flag = "OK " if good else "FAIL"
-            regressed = " (motor açıkken bozuldu!)" if baseline.get(host) and not good else ""
-            print(f"  {host:22s} {flag} {ms:7.0f} ms  {info}{regressed}")
-            if baseline.get(host) and not good:
+            result = strategy_finder.probe_host(host)
+            flag = "OK  " if result.ok else "FAIL"
+            note = ""
+            if baseline.get(host) and not result.ok:
+                note = "  ← motor açıkken BOZULDU"
                 failures += 1
+            elif not baseline.get(host) and result.ok:
+                note = "  ← motor ENGELİ AŞTI"
+            if not result.ok:
+                still_blocked.append(host)
+            print(f"    {host:22s} {flag} {result.ms:6.0f} ms  {result.diagnosis}{note}")
+
+        engine_fixed_it = bool(blocked_hosts) and not still_blocked
 
         stats = dpi_bypass.engine_stats()
         print(f"\n  Görülen paket    : {stats.get('packets_seen')}")
         print(f"  Yeniden yazılan  : {stats.get('packets_rewritten')}")
         print(f"  Gönderilen parça : {stats.get('segments_sent')}")
         print(f"  Sahte paket      : {stats.get('decoys_sent')}")
+        print(f"  Engellenen RST   : {stats.get('rst_blocked', 0)}")
+        print(f"  Öğrenilen mesafe : {stats.get('hops_learned', 0)} sunucu")
         print(f"  Hata             : {stats.get('errors')}")
         print(f"  Son alan adları  : {', '.join(stats.get('last_hosts', [])[-6:]) or '—'}")
 
         if not stats.get("packets_rewritten"):
             failures += 1
             print("  !! Hiç paket yeniden yazılmadı — filtre veya sürücü sorunu.")
+
+        if blocked_hosts and still_blocked:
+            print(f"\n  Bu profil yetmedi ({', '.join(still_blocked)} hâlâ kapalı).")
+            print("  Tüm profiller sırayla deneniyor — bu 1-2 dakika sürebilir…\n")
+            dpi_bypass.stop_dpi_bypass()
+            report = strategy_finder.find_best_strategy(
+                targets=tuple(blocked_hosts),
+                on_progress=lambda line: print(f"  {line}")
+            )
+            print(f"\n  SONUÇ: {report.summary()}")
+            if report.best is None:
+                failures += 1
+        elif engine_fixed_it:
+            print("\n  ✅ Motor engeli aştı: kapalıyken erişilemeyen hedefler açıldı.")
 
     section("[4/6] Motoru durdurma")
     ok, msg = dpi_bypass.stop_dpi_bypass()

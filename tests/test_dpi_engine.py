@@ -277,9 +277,29 @@ def test_auto_ttl_and_rst():
     import windivert as wd_mod
     addr = wd_mod.WinDivertAddress()
 
+    engine._hops.clear()          # distance unknown → fall back to the flow window
     rec = Recorder()
     engine._handle_inbound(rec, inbound_rst(pkt.dst_ip, pkt.dst_port, pkt.src_port), addr)
-    check("DPI kaynaklı RST düşürülür", rec.forwarded == 0 and engine.stats.rst_blocked == 1)
+    check("mesafe bilinmezken RST düşürülür", rec.forwarded == 0 and engine.stats.rst_blocked == 1)
+
+    # Distance known: a reset from a middlebox arrives from noticeably closer
+    # than the server, while the server's own reset matches its hop count.
+    engine._remember_flow(pkt)
+    engine._hops[pkt.dst_ip] = 14              # server is 14 hops away
+    rec = Recorder()
+    engine._handle_inbound(rec, inbound_rst(pkt.dst_ip, pkt.dst_port, pkt.src_port), addr)
+    check("DPI kutusundan gelen (daha yakın) RST düşürülür",
+          rec.forwarded == 0 and engine.stats.rst_blocked == 2)
+
+    engine._remember_flow(pkt)
+    engine._hops[pkt.dst_ip] = 7               # matches the probe's TTL 57 → 7 hops
+    rec = Recorder()
+    engine._handle_inbound(rec, inbound_rst(pkt.dst_ip, pkt.dst_port, pkt.src_port), addr)
+    check("sunucunun gerçek RST'si engellenmez (mesafe uyuşuyor)",
+          rec.forwarded == 1 and engine.stats.rst_blocked == 2)
+
+    engine._hops.clear()
+    engine._remember_flow(pkt)
 
     rec = Recorder()
     engine._handle_inbound(rec, inbound_rst(bytes([9, 9, 9, 9]), 443, 40000), addr)

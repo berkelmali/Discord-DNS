@@ -96,29 +96,34 @@ class DpiConfig:
 
 
 PRESETS: Dict[str, DpiConfig] = {
+    # RST protection is on everywhere below. Turkish ISPs enforce SNI blocks by
+    # injecting a forged RST the moment they see the hostname — measured on a TT
+    # mobile line: TCP connects, then the handshake dies with ECONNRESET ~66 ms
+    # in. Fragmentation alone is a bet that the DPI cannot reassemble; dropping
+    # the forged reset is the safety net for when that bet loses.
     "superonline": DpiConfig(
         name="Superonline DPI Bypass",
-        description="Agresif: SNI içi bölme + ters sıra + sahte paket + QUIC kapalı",
+        description="Agresif: SNI içi bölme + ters sıra + sahte paket + RST koruması + QUIC kapalı",
         split_position=2, split_at_sni=True, reverse_order=True,
-        decoy=True, fake_ttl=0, block_quic=True,
+        decoy=True, fake_ttl=0, block_rst=True, auto_ttl=True, block_quic=True,
     ),
     "ttnet": DpiConfig(
-        name="Türk Telekom DPI Bypass",
-        description="SNI içi bölme + sahte paket (sıralı gönderim)",
+        name="Türk Telekom / Avea DPI Bypass",
+        description="SNI içi bölme + sahte paket + RST enjeksiyonu koruması",
         split_position=3, split_at_sni=True, reverse_order=False,
-        decoy=True, fake_ttl=0, block_quic=True,
+        decoy=True, fake_ttl=0, block_rst=True, auto_ttl=True, block_quic=True,
     ),
     "vodafone": DpiConfig(
         name="Vodafone / KabloNet Bypass",
-        description="Hafif: SNI içi bölme, sahte paket yok",
+        description="Hafif: SNI içi bölme + RST koruması, sahte paket yok",
         split_position=2, split_at_sni=True, reverse_order=False,
-        decoy=False, block_quic=False,
+        decoy=False, block_rst=True, block_quic=False,
     ),
     "general": DpiConfig(
         name="Genel DPI Bypass",
-        description="Dengeli varsayılan strateji",
+        description="Dengeli varsayılan: bölme + sahte paket + RST koruması",
         split_position=2, split_at_sni=True, reverse_order=True,
-        decoy=True, block_quic=False,
+        decoy=True, block_rst=True, block_quic=False,
     ),
     "discord_only": DpiConfig(
         name="Sadece Discord",
@@ -402,12 +407,31 @@ class NativeDpiEngine:
             key = (pkt.src_ip, pkt.src_port, pkt.dst_port)
             with self._lock:
                 seen_at = self._recent_flows.get(key)
+                server_hops = self._hops.get(pkt.src_ip)
+
             if seen_at is not None and (time.time() - seen_at) <= self.config.rst_window_s:
-                with self._lock:
-                    self._recent_flows.pop(key, None)
-                self.stats.rst_blocked += 1
-                logger.debug("DPI kaynaklı RST düşürüldü")
-                return                      # not re-injected → the reset never lands
+                forged = True
+                reason = "yeniden yazılan akış"
+
+                # Sharper test when we know the distance: a middlebox sits closer
+                # than the server, so its forged reset arrives with a noticeably
+                # higher TTL than the server's own packets. If the hop counts
+                # match, this is much more likely a real reset — let it through.
+                rst_hops = dp.infer_hop_count(pkt.ttl)
+                if server_hops is not None and rst_hops is not None:
+                    if rst_hops >= server_hops - 1:
+                        forged = False
+                        reason = "sunucudan geliyor (mesafe uyuşuyor)"
+                    else:
+                        reason = f"DPI kutusu {server_hops - rst_hops} sekme daha yakın"
+
+                if forged:
+                    with self._lock:
+                        self._recent_flows.pop(key, None)
+                    self.stats.rst_blocked += 1
+                    logger.info("Sahte RST düşürüldü — %s", reason)
+                    return                  # not re-injected → the reset never lands
+                logger.debug("RST geçirildi — %s", reason)
 
         handle.send(packet, addr)
 

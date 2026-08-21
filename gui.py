@@ -143,6 +143,7 @@ class DiscordDNSApp(ctk.CTk):
 
         # State
         self._cleanup_done        = False
+        self._last_block_kind     = None
         self.is_admin_user        = admin_utils.is_admin()
         self.adapters             = dns_manager.get_network_adapters()
         self.selected_adapter     = self.adapters[0] if self.adapters else "Wi-Fi"
@@ -1286,6 +1287,7 @@ class DiscordDNSApp(ctk.CTk):
         self.dns_state = dns
         self._watchdog_check(dns)
         self._refresh_tray_tooltip()
+        self._explain_failure_if_needed(disc)
 
         v4 = ", ".join(dns.get("ipv4", [])) or "Otomatik (DHCP)"
         v6 = ", ".join(dns.get("ipv6", [])) or "Otomatik (DHCP)"
@@ -1553,6 +1555,46 @@ class DiscordDNSApp(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════════════════════
     #  DIAGNOSTICS & AUTOMATIC STRATEGY
     # ═══════════════════════════════════════════════════════════════════════════════
+
+    def _explain_failure_if_needed(self, disc):
+        """
+        When Discord goes unreachable, say *why* instead of just showing a red
+        card. The check runs off the UI thread and only when the state actually
+        changes, so a persistent outage does not spam the log every 30 seconds.
+        """
+        if disc.get("accessible"):
+            if self._last_block_kind not in (None, "ok"):
+                self.log("✓ Bağlantı düzeldi.")
+            self._last_block_kind = "ok"
+            return
+
+        if self._last_block_kind not in (None, "ok"):
+            return                      # already explained this outage
+
+        self._last_block_kind = "checking"
+
+        def worker():
+            try:
+                verdict = diagnostics.classify_block("discord.com")
+            except Exception as e:
+                self.after(0, self.log, f"Teşhis çalıştırılamadı: {e}")
+                self.after(0, setattr, self, "_last_block_kind", None)
+                return
+            self.after(0, self._show_block_verdict, verdict)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_block_verdict(self, verdict):
+        self._last_block_kind = verdict.get("kind")
+        self.log(f"🔎 Erişim sorunu teşhisi: {verdict.get('message')}")
+        for item in verdict.get("evidence", []):
+            self.log(f"    · {item}")
+
+        kind = verdict.get("kind")
+        if kind in ("sni_rst", "sni_timeout") and "Kanal 3" not in self.active_channel:
+            self.log("↪ Öneri: Kanal 3 (DPI Bypass) veya 🎯 Strateji Bul.")
+        elif kind in ("dns_hijack", "mitm") and "Kanal 2" not in self.active_channel:
+            self.log("↪ Öneri: Kanal 2 (şifreli DNS).")
 
     def open_diagnostics(self):
         """Collect a shareable diagnostic report and show it in its own window."""

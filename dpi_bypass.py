@@ -60,7 +60,11 @@ _active_engine: Optional[str] = None
 _ISP_PATTERNS = (
     ("turknet",     r"\bturk\s*net\b|\bturknet\b"),
     ("superonline", r"\bsuperonline\b|\bturkcell\b"),
-    ("ttnet",       r"\bt(?:ü|u)rk\s*telekom\b|\bttnet\b|\btt-?net\b"),
+    # Türk Telekom trades under several names, and its mobile arm shows up as
+    # "Avea" or "TT Mobil" in WHOIS/AS records. Missing those meant a TT mobile
+    # line fell through to the weakest generic profile.
+    ("ttnet",       r"\bt(?:ü|u)rk\s*telekom\b|\bttnet\b|\btt-?net\b|"
+                    r"\bavea\b|\btt\s*mobil\b|\bas9121\b|\bas20978\b"),
     ("vodafone",    r"\bvodafone\b"),
     ("kablonet",    r"\bkablonet\b|\bkablo\s*net\b|\bturksat\b"),
     ("millenicom",  r"\bmillenicom\b"),
@@ -83,7 +87,7 @@ _ISP_PROFILES: Dict[str, Dict[str, str]] = {
     },
     "ttnet": {
         "channel": "Türk Telekom DPI Bypass",
-        "text": "Türk Telekom -- SNI & DNS Yönlendirmesi var. DoH + DPI Bypass ÖNERİLİR!",
+        "text": "Türk Telekom / Avea -- DNS yönlendirmesi + SNI RST enjeksiyonu var. DoH + DPI Bypass ŞART!",
         "mode": "ttnet",
     },
     "vodafone": {

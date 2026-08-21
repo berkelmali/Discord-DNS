@@ -127,6 +127,129 @@ def check_dns_hijack(host: str = "discord.com") -> Tuple[bool, str]:
         return True, verdict
 
 
+def classify_block(host: str = "discord.com", timeout: float = 6.0) -> dict:
+    """
+    Work out *why* a host is unreachable, layer by layer, instead of reporting a
+    bare "connection failed".
+
+    Each step isolates one layer, so the answer names the actual mechanism:
+
+      1. system DNS vs encrypted DNS  → hijacked answer?
+      2. plain TCP to the real address → port-level block?
+      3. TLS with the real hostname    → reset the moment the SNI goes out?
+
+    Returns a dict with `kind`, a Turkish `message`, and the evidence behind it.
+    """
+    evidence: List[str] = []
+
+    # ── layer 1: what does each resolver say?
+    system_servers: List[str] = []
+    for adapter in dns_manager.get_network_adapters():
+        servers = dns_manager.get_current_dns(adapter).get("ipv4") or []
+        system_servers = [s for s in servers if s != dns_manager.LOCAL_RESOLVER_IPV4]
+        if system_servers:
+            break
+
+    try:
+        real_ips = doh_proxy.resolve_a(host, timeout)
+    except Exception as e:
+        real_ips = []
+        evidence.append(f"Şifreli DNS hatası: {e}")
+
+    if not real_ips:
+        return {
+            "kind": "doh_unreachable",
+            "message": ("Şifreli DNS sunucularına ulaşılamıyor. İnternet bağlantınız "
+                        "tamamen kopmuş olabilir ya da İSS 443/TLS trafiğini kısıtlıyor."),
+            "evidence": evidence,
+            "host": host,
+        }
+
+    system_ips = _dns_query(system_servers[0], host, timeout) if system_servers else []
+    hijacked = False
+    if system_ips and not (set(system_ips) & set(real_ips)):
+        # Different addresses alone prove nothing — big sites answer with
+        # different CDN edges every lookup. It is only a hijack if the address
+        # the ISP handed us cannot serve a valid certificate for this host.
+        ctx = ssl.create_default_context()
+        try:
+            with socket.create_connection((system_ips[0], 443), timeout) as raw:
+                ctx.wrap_socket(raw, server_hostname=host).close()
+            evidence.append(f"Sistem DNS'i farklı adres verdi ({system_ips[0]}) ama "
+                            "sertifika geçerli — CDN farkı, kaçırma değil")
+        except Exception as e:
+            hijacked = True
+            evidence.append(f"Sistem DNS'i ({system_servers[0]}) → {system_ips[0]} "
+                            f"[{type(e).__name__}], gerçek adres → {real_ips[0]}")
+
+    # ── layer 2: can we even reach the real server?
+    try:
+        socket.create_connection((real_ips[0], 443), timeout).close()
+        evidence.append(f"TCP {real_ips[0]}:443 → açık")
+        tcp_ok = True
+    except Exception as e:
+        tcp_ok = False
+        evidence.append(f"TCP {real_ips[0]}:443 → {type(e).__name__}")
+
+    if not tcp_ok:
+        return {
+            "kind": "tcp_blocked",
+            "message": (f"{host} sunucusuna TCP bağlantısı hiç kurulamıyor — İSS "
+                        "IP/port seviyesinde engelliyor. DPI motoru bu tür engeli aşamaz."),
+            "evidence": evidence,
+            "host": host,
+        }
+
+    # ── layer 3: does the hostname itself get the connection killed?
+    ctx = ssl.create_default_context()
+    try:
+        with socket.create_connection((real_ips[0], 443), timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=host) as tls:
+                evidence.append(f"TLS el sıkışması başarılı ({tls.version()})")
+        kind = "dns_hijack" if hijacked else "ok"
+        message = ("İSS DNS'inizi yönlendiriyor ama şifreli DNS ile sorun çözülüyor — "
+                   "Kanal 2'yi açık tutun."
+                   if hijacked else
+                   f"{host} erişilebilir durumda, engel tespit edilmedi.")
+        return {"kind": kind, "message": message, "evidence": evidence, "host": host}
+    except ssl.SSLCertVerificationError:
+        evidence.append("Sunucu sahte sertifika sundu")
+        return {
+            "kind": "mitm",
+            "message": ("Bağlantı sahte bir sertifikayla karşılandı — araya girilmiş "
+                        "bir sunucuya yönlendiriliyorsunuz."),
+            "evidence": evidence,
+            "host": host,
+        }
+    except ConnectionResetError:
+        evidence.append("ClientHello gönderildikten hemen sonra RST geldi")
+        return {
+            "kind": "sni_rst",
+            "message": ("SNI ENGELİ: TCP bağlantısı kuruluyor, ancak İSS alan adını "
+                        f"({host}) görür görmez bağlantıyı sahte bir RST paketiyle "
+                        "kesiyor. Kanal 3 (DPI motoru) tam olarak bunun için var — "
+                        "paket bölme + RST koruması ile aşılır."),
+            "evidence": evidence,
+            "host": host,
+        }
+    except (socket.timeout, TimeoutError):
+        evidence.append("TLS el sıkışması yanıtsız kaldı")
+        return {
+            "kind": "sni_timeout",
+            "message": ("İSS, alan adını gördükten sonra paketleri sessizce yutuyor "
+                        "(zaman aşımı). Kanal 3 (DPI motoru) denenmelidir."),
+            "evidence": evidence,
+            "host": host,
+        }
+    except Exception as e:
+        return {
+            "kind": "unknown",
+            "message": f"Beklenmeyen hata: {type(e).__name__}: {e}",
+            "evidence": evidence,
+            "host": host,
+        }
+
+
 def tls_probe(host: str, timeout: float = 6.0) -> Tuple[bool, float, str]:
     ctx = ssl.create_default_context()
     started = time.time()
