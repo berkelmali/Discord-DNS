@@ -109,15 +109,24 @@ PRESETS: Dict[str, DpiConfig] = {
     # the forged reset is the safety net for when that bet loses.
     "superonline": DpiConfig(
         name="Superonline DPI Bypass",
-        description="Agresif: SNI içi bölme + ters sıra + sahte paket + RST koruması + QUIC kapalı",
+        # Same technique as the verified TT profile, by analogy — Superonline's
+        # box has not been measured here, so the ladder still tries the others.
+        description="Doğru sıra numaralı TTL sahte paketi + erken bölme + ters sıra",
         split_position=2, split_at_sni=True, reverse_order=True,
-        decoy=True, fake_ttl=0, block_rst=True, auto_ttl=True, block_quic=True,
+        decoy=True, decoy_fooling=("ttl",), auto_ttl=True, auto_ttl_margin=1,
+        fake_ttl=5, block_rst=True, block_quic=True,
     ),
     "ttnet": DpiConfig(
         name="Türk Telekom / Avea DPI Bypass",
-        description="SNI içi bölme + sahte paket + RST enjeksiyonu koruması",
-        split_position=3, split_at_sni=True, reverse_order=False,
-        decoy=True, fake_ttl=0, block_rst=True, auto_ttl=True, block_quic=True,
+        # Measured on a live TT mobile line: this is the only strategy that got
+        # through. Splitting alone failed on every variant because the box
+        # reassembles the stream; the decoy at the correct sequence number, aged
+        # so it dies before the server, was never even answered with a reset.
+        description="Ölçümle doğrulanmış: doğru sıra numaralı TTL sahte paketi + "
+                    "SNI içi bölme + RST koruması",
+        split_position=2, split_at_sni=True, reverse_order=True,
+        decoy=True, decoy_fooling=("ttl",), auto_ttl=True, auto_ttl_margin=1,
+        fake_ttl=5, block_rst=True, block_quic=True,
     ),
     "vodafone": DpiConfig(
         name="Vodafone / KabloNet Bypass",
@@ -159,7 +168,7 @@ PRESETS: Dict[str, DpiConfig] = {
                     "yeniden birleştiren DPI kutuları için",
         split_position=2, split_at_sni=True, reverse_order=True,
         decoy=True, decoy_fooling=("ttl",), auto_ttl=True, auto_ttl_margin=1,
-        block_rst=True, block_quic=True,
+        fake_ttl=5, block_rst=True, block_quic=True,
     ),
     "stateful_fake_only": DpiConfig(
         name="Sadece Sahte Paket",
@@ -167,7 +176,7 @@ PRESETS: Dict[str, DpiConfig] = {
                     "gerçek istek olduğu gibi gider",
         split_position=0, split_at_sni=False, reverse_order=False,
         decoy=True, decoy_fooling=("ttl",), auto_ttl=True, auto_ttl_margin=1,
-        block_rst=True, block_quic=True,
+        fake_ttl=5, block_rst=True, block_quic=True,
     ),
     "native_frag": DpiConfig(
         name="IP Parçalama",
@@ -182,10 +191,12 @@ PRESETS: Dict[str, DpiConfig] = {
 # Tried in this order by the strategy finder: cheapest and least invasive first,
 # so a line that only needs a nudge never ends up on the heavy-handed profile.
 AGGRESSION_LADDER: Tuple[str, ...] = (
-    "vodafone", "general", "ttnet", "superonline", "hardened", "maximum",
-    # Aimed at DPI that reassembles the stream: these put a decoy at the correct
-    # sequence number and rely on TTL to keep it away from the server.
-    "stateful", "stateful_fake_only", "native_frag",
+    # "stateful" comes early because it is the one strategy measured to work
+    # against a Turkish DPI box: a decoy at the correct sequence number, aged by
+    # TTL so it never reaches the server. The purely fragmenting profiles stay in
+    # the ladder for boxes that do not reassemble, but they are tried afterwards.
+    "vodafone", "general", "stateful", "stateful_fake_only",
+    "ttnet", "superonline", "hardened", "maximum", "native_frag",
 )
 
 
@@ -521,14 +532,29 @@ class NativeDpiEngine:
     def _decoy_ttl(self, dst_ip: bytes) -> Optional[int]:
         """
         TTL for the decoy: far enough to clear the ISP's DPI, short enough to
-        expire before the destination. Falls back to the fixed fake_ttl.
+        expire before the destination.
+
+        Getting this too low only wastes a packet. Getting it too high is the
+        dangerous direction — the decoy would reach the server and corrupt the
+        real handshake — so every path here errs downwards.
         """
+        hops = None
         if self.config.auto_ttl:
             with self._lock:
                 hops = self._hops.get(dst_ip)
-            if hops and hops > self.config.auto_ttl_margin + 1:
-                return max(2, hops - self.config.auto_ttl_margin)
-        return self.config.fake_ttl or None
+
+        if hops:
+            if hops <= self.config.auto_ttl_margin + 1:
+                return None            # server too close to age a decoy safely
+            return max(2, hops - self.config.auto_ttl_margin)
+
+        if self.config.fake_ttl:
+            # Distance unknown (first connection to this server). A low fixed
+            # value still clears a nearby DPI box, and if it falls short the
+            # decoy simply dies early and harmlessly; the retry gets the real
+            # hop count once a SYN-ACK has been seen.
+            return self.config.fake_ttl
+        return None
 
     def _remember_flow(self, pkt: "dp.TcpPacket") -> None:
         if not self.config.block_rst:

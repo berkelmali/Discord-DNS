@@ -79,6 +79,18 @@ Motor, WinDivert filtresi sayesinde çekirdekten yalnızca **ilgili paketleri** 
 
 `vodafone` → `general` → `ttnet` → `superonline` → `hardened` → `maximum` → `stateful` → `stateful_fake_only` → `native_frag`
 
+**Sahada doğrulandı (Türk Telekom / Avea mobil hattı):**
+
+```
+Motor kapalıyken:  discord.com FAIL — SNI engeli, İSS bağlantıyı RST ile kesti
+                   gateway.discord.gg FAIL — aynı
+
+→ Durum Takipli DPI profili:  2/2 hedef açıldı, ortanca 188 ms
+                              (2 paket yeniden yazıldı, 0 RST engellendi)
+```
+
+`0 RST engellendi` satırı burada en önemli veri: DPI kutusu reset **göndermedi bile**. Yani bağlantı "reset'e rağmen ayakta kalmadı" — engel hiç tetiklenmedi. Aynı hatta yalnızca parçalamaya dayanan yedi profilin tamamı başarısız oldu, çünkü o kutu TCP akışını yeniden birleştiriyor.
+
 **Durum takipli DPI için özel profiller:** Türk Telekom mobil (Avea) hattında yapılan ölçüm, oradaki DPI kutusunun TCP akışını **yeniden birleştirdiğini** gösterdi — parçalama tek başına yetmiyor. Bu kutulara karşı sahte paketin *doğru sıra numarasında* olması ve sunucuya varmadan **TTL ile ölmesi** gerekir (pencere dışı `badseq` sahte paketini durum takibi yapan DPI zaten yok sayar). `stateful` ve `stateful_fake_only` profilleri tam olarak bunu yapar; sunucu mesafesi henüz öğrenilmemişse sahte paket **hiç gönderilmez**, çünkü yanlış TTL gerçek el sıkışmasını bozardı.
 
 Ayrıca yalnızca Discord alan adlarına dokunan `discord_only` profili vardır.

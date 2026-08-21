@@ -352,6 +352,27 @@ def test_finder_and_diagnostics():
     import strategy_finder as sf
 
     check("agresiflik merdiveni tanımlı", len(dpi_engine.AGGRESSION_LADDER) >= 5)
+
+    # The strategy measured to work against a Turkish DPI box must be reached
+    # early, not after eight failed attempts.
+    ladder = dpi_engine.AGGRESSION_LADDER
+    check("kanıtlanmış strateji merdivende erken geliyor",
+          ladder.index("stateful") <= 2, f"index={ladder.index('stateful')}")
+    for name in ("ttnet", "superonline", "stateful"):
+        config = dpi_engine.PRESETS[name]
+        check(f"{name}: sahte paket doğru sıra numarasında (durum takipli DPI için)",
+              config.decoy_fooling == ("ttl",) and config.auto_ttl)
+        check(f"{name}: mesafe bilinmezken güvenli yedek TTL var",
+              0 < config.fake_ttl <= 8, f"fake_ttl={config.fake_ttl}")
+
+    engine = dpi_engine.NativeDpiEngine(dpi_engine.PRESETS["ttnet"])
+    server = bytes([1, 2, 3, 4])
+    check("mesafe bilinmezken yedek TTL kullanılır", engine._decoy_ttl(server) == 5)
+    engine._hops[server] = 12
+    check("mesafe öğrenilince ondan hesaplanır", engine._decoy_ttl(server) == 11)
+    engine._hops[server] = 2
+    check("sunucu çok yakınsa sahte paket gönderilmez — el sıkışma bozulmasın",
+          engine._decoy_ttl(server) is None)
     check("merdivendeki profillerin hepsi mevcut",
           all(name in dpi_engine.PRESETS for name in dpi_engine.AGGRESSION_LADDER))
     check("merdiven en hafiften başlar",
