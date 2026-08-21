@@ -291,12 +291,33 @@ def test_auto_ttl_and_rst():
     check("DPI kutusundan gelen (daha yakın) RST düşürülür",
           rec.forwarded == 0 and engine.stats.rst_blocked == 2)
 
+    # Default: the TTL comparison is OFF. Measured on a TT mobile line, the
+    # injected resets arrived with a TTL matching the server's distance, so the
+    # check waved every one of them through and the strongest profiles blocked
+    # nothing at all. Inside the window, a reset on a rewritten flow is hostile.
     engine._remember_flow(pkt)
     engine._hops[pkt.dst_ip] = 7               # matches the probe's TTL 57 → 7 hops
     rec = Recorder()
     engine._handle_inbound(rec, inbound_rst(pkt.dst_ip, pkt.dst_port, pkt.src_port), addr)
-    check("sunucunun gerçek RST'si engellenmez (mesafe uyuşuyor)",
-          rec.forwarded == 1 and engine.stats.rst_blocked == 2)
+    check("varsayılan: mesafe uyuşsa bile RST düşürülür (TTL taklidine karşı)",
+          rec.forwarded == 0 and engine.stats.rst_blocked == 3)
+
+    # A DPI box firing several resets in a row must be blocked every time — the
+    # flow entry deliberately survives the first block.
+    rec = Recorder()
+    engine._handle_inbound(rec, inbound_rst(pkt.dst_ip, pkt.dst_port, pkt.src_port), addr)
+    check("art arda gelen ikinci RST de düşürülür",
+          rec.forwarded == 0 and engine.stats.rst_blocked == 4)
+
+    # Opt-in: networks where the check does help can still enable it
+    engine.config = dpi_engine.DpiConfig(**{**dpi_engine.PRESETS["hardened"].__dict__,
+                                            "rst_ttl_check": True})
+    engine._remember_flow(pkt)
+    rec = Recorder()
+    engine._handle_inbound(rec, inbound_rst(pkt.dst_ip, pkt.dst_port, pkt.src_port), addr)
+    check("rst_ttl_check açıkken mesafe uyuşan RST geçirilir",
+          rec.forwarded == 1 and engine.stats.rst_blocked == 4)
+    engine.config = dpi_engine.PRESETS["hardened"]
 
     engine._hops.clear()
     engine._remember_flow(pkt)

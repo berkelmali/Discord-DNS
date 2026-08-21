@@ -82,6 +82,8 @@ class DpiConfig:
     block_rst: bool = False        # drop the forged RST a DPI box sends to kill
                                    # a connection it could not classify
     rst_window_s: float = 4.0      # only for flows we just rewrote, and only briefly
+    rst_ttl_check: bool = False    # let a reset through when its TTL matches the
+                                   # server's distance (off: some DPI spoofs TTL)
     native_frag: bool = False      # split at the IP layer instead of the TCP one
     handle_http: bool = True       # also rewrite plain HTTP requests
     http_mangle: bool = True       # `Host:` → `hOsT:`
@@ -151,6 +153,22 @@ PRESETS: Dict[str, DpiConfig] = {
         auto_ttl_margin=2, block_rst=True, block_quic=True,
         http_mangle=True, http_mix_case=True, http_swap_spaces=True,
     ),
+    "stateful": DpiConfig(
+        name="Durum Takipli DPI",
+        description="Doğru sıra numaralı, TTL ile ölen sahte ClientHello — akışı "
+                    "yeniden birleştiren DPI kutuları için",
+        split_position=2, split_at_sni=True, reverse_order=True,
+        decoy=True, decoy_fooling=("ttl",), auto_ttl=True, auto_ttl_margin=1,
+        block_rst=True, block_quic=True,
+    ),
+    "stateful_fake_only": DpiConfig(
+        name="Sadece Sahte Paket",
+        description="Bölme yok: yalnızca TTL ile ölen sahte ClientHello gönderilir, "
+                    "gerçek istek olduğu gibi gider",
+        split_position=0, split_at_sni=False, reverse_order=False,
+        decoy=True, decoy_fooling=("ttl",), auto_ttl=True, auto_ttl_margin=1,
+        block_rst=True, block_quic=True,
+    ),
     "native_frag": DpiConfig(
         name="IP Parçalama",
         description="TCP yerine IP katmanında parçalar — TCP akışını birleştiren ama "
@@ -164,7 +182,10 @@ PRESETS: Dict[str, DpiConfig] = {
 # Tried in this order by the strategy finder: cheapest and least invasive first,
 # so a line that only needs a nudge never ends up on the heavy-handed profile.
 AGGRESSION_LADDER: Tuple[str, ...] = (
-    "vodafone", "general", "ttnet", "superonline", "hardened", "maximum", "native_frag",
+    "vodafone", "general", "ttnet", "superonline", "hardened", "maximum",
+    # Aimed at DPI that reassembles the stream: these put a decoy at the correct
+    # sequence number and rely on TTL to keep it away from the server.
+    "stateful", "stateful_fake_only", "native_frag",
 )
 
 
@@ -468,21 +489,28 @@ class NativeDpiEngine:
                 forged = True
                 reason = "yeniden yazılan akış"
 
-                # Sharper test when we know the distance: a middlebox sits closer
-                # than the server, so its forged reset arrives with a noticeably
-                # higher TTL than the server's own packets. If the hop counts
-                # match, this is much more likely a real reset — let it through.
-                rst_hops = dp.infer_hop_count(pkt.ttl)
-                if server_hops is not None and rst_hops is not None:
-                    if rst_hops >= server_hops - 1:
-                        forged = False
-                        reason = "sunucudan geliyor (mesafe uyuşuyor)"
-                    else:
-                        reason = f"DPI kutusu {server_hops - rst_hops} sekme daha yakın"
+                # Optional sharper test: a middlebox sits closer than the server,
+                # so its reset can arrive with a higher TTL. Measured on a TT
+                # mobile line this backfired — the injected resets carried a TTL
+                # matching the server's distance, so the check waved every one of
+                # them through and the profiles that enabled it blocked nothing.
+                # It stays available for networks where it helps, but off by
+                # default: inside the window, a reset on a flow we just rewrote is
+                # treated as hostile.
+                if self.config.rst_ttl_check:
+                    rst_hops = dp.infer_hop_count(pkt.ttl)
+                    if server_hops is not None and rst_hops is not None:
+                        if rst_hops >= server_hops - 1:
+                            forged = False
+                            reason = "sunucudan geliyor (mesafe uyuşuyor)"
+                        else:
+                            reason = f"DPI kutusu {server_hops - rst_hops} sekme daha yakın"
 
                 if forged:
-                    with self._lock:
-                        self._recent_flows.pop(key, None)
+                    # The flow deliberately stays in the table: a DPI box usually
+                    # fires several resets in a row, and popping the entry after
+                    # the first one let every follow-up through — which is why
+                    # blocking "worked" and the connection died anyway.
                     self.stats.rst_blocked += 1
                     logger.info("Sahte RST düşürüldü — %s", reason)
                     return                  # not re-injected → the reset never lands
@@ -566,7 +594,7 @@ class NativeDpiEngine:
             payload, self.config.split_position, self.config.split_at_sni
         )
         segments = dp.split_payload(payload, positions)
-        if len(segments) < 2:
+        if len(segments) < 2 and not self.config.decoy:
             handle.send(packet, addr)
             self.stats.passthrough += 1
             return
@@ -575,29 +603,41 @@ class NativeDpiEngine:
         if self.config.decoy:
             fooling = self.config.decoy_fooling
             decoy = dp.make_decoy_payload(payload, span if kind == "tls" else None)
+            decoy_ttl = self._decoy_ttl(pkt.dst_ip)
 
-            # Out-of-window sequence: the server drops the data without even
-            # looking at it, while DPI boxes that do not track windows still
-            # swallow the fake hostname.
-            seq = pkt.seq
-            if "badseq" in fooling:
-                seq = (pkt.seq - self.config.decoy_seq_offset) & 0xFFFFFFFF
+            # A DPI box that tracks sequence numbers ignores an out-of-window
+            # decoy completely — which is exactly what a "badseq" fake is. To
+            # fool a stateful box the decoy has to sit at the *correct* sequence
+            # number and be stopped from reaching the server by its TTL instead.
+            ttl_only = "ttl" in fooling and not ({"badseq", "badsum"} & set(fooling))
 
-            # Auto-TTL replaces the fixed value once we have learned the
-            # distance to this server from an earlier SYN-ACK.
-            decoy_ttl = self._decoy_ttl(pkt.dst_ip) if ("ttl" in fooling or self.config.auto_ttl) else None
-            fake = dp.build_segment(pkt, decoy, seq, ip_id=self._next_ip_id(), ttl=decoy_ttl)
-
-            if "badsum" in fooling:
-                dp.finalize_badsum(fake, pkt)
-                sent = handle.send_precomputed(fake, addr.copy())
+            if ttl_only and decoy_ttl is None:
+                # Distance to this server not learned yet. A TTL-only decoy with
+                # a guessed hop count would reach the server and corrupt the real
+                # handshake, so skip it rather than gamble with the connection.
+                logger.debug("TTL sahte paketi atlandı — sunucu mesafesi bilinmiyor")
             else:
-                sent = handle.send(fake, addr.copy())
-            if sent:
-                self.stats.decoys_sent += 1
+                seq = pkt.seq
+                if "badseq" in fooling:
+                    seq = (pkt.seq - self.config.decoy_seq_offset) & 0xFFFFFFFF
+
+                fake = dp.build_segment(pkt, decoy, seq, ip_id=self._next_ip_id(),
+                                        ttl=decoy_ttl)
+                if "badsum" in fooling:
+                    dp.finalize_badsum(fake, pkt)
+                    sent = handle.send_precomputed(fake, addr.copy())
+                else:
+                    sent = handle.send(fake, addr.copy())
+                if sent:
+                    self.stats.decoys_sent += 1
 
         # 2) the real payload — either as IP fragments or as TCP segments
-        if self.config.native_frag and pkt.version == 4:
+        if len(segments) < 2:
+            # Decoy-only strategy: the fake goes first, then the request itself
+            # travels untouched. Useful when a DPI reassembles fragments anyway.
+            if handle.send(packet, addr):
+                self.stats.segments_sent += 1
+        elif self.config.native_frag and pkt.version == 4:
             self._send_ip_fragments(handle, pkt, payload, positions, addr)
         else:
             ordered: List[Tuple[int, bytes]] = list(segments)

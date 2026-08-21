@@ -77,7 +77,9 @@ Motor, WinDivert filtresi sayesinde çekirdekten yalnızca **ilgili paketleri** 
 
 İSS profillerine göre hazır stratejiler `dpi_engine.PRESETS` içinde tanımlıdır ve strateji bulucu bunları en hafiften en agresife doğru dener:
 
-`vodafone` → `general` → `ttnet` → `superonline` → `hardened` → `maximum` → `native_frag`
+`vodafone` → `general` → `ttnet` → `superonline` → `hardened` → `maximum` → `stateful` → `stateful_fake_only` → `native_frag`
+
+**Durum takipli DPI için özel profiller:** Türk Telekom mobil (Avea) hattında yapılan ölçüm, oradaki DPI kutusunun TCP akışını **yeniden birleştirdiğini** gösterdi — parçalama tek başına yetmiyor. Bu kutulara karşı sahte paketin *doğru sıra numarasında* olması ve sunucuya varmadan **TTL ile ölmesi** gerekir (pencere dışı `badseq` sahte paketini durum takibi yapan DPI zaten yok sayar). `stateful` ve `stateful_fake_only` profilleri tam olarak bunu yapar; sunucu mesafesi henüz öğrenilmemişse sahte paket **hiç gönderilmez**, çünkü yanlış TTL gerçek el sıkışmasını bozardı.
 
 Ayrıca yalnızca Discord alan adlarına dokunan `discord_only` profili vardır.
 
@@ -93,7 +95,7 @@ Motor, GoodbyeDPI'nin HTTPS/SNI tekniklerinin tamamını kendi kodumuzla uygular
 | `--wrong-chksum` bozuk sağlamalı sahte paket | ✅ (badseq ile birlikte) |
 | `--auto-ttl` otomatik TTL | ✅ gelen SYN-ACK'ten mesafe öğrenilir |
 | `--native-frag` IP katmanında parçalama | ✅ `native_frag` profili |
-| `-p` pasif DPI engelleme (sahte RST) | ✅ tüm profillerde varsayılan, üstelik **TTL mesafesiyle** gerçek RST'den ayırt eder |
+| `-p` pasif DPI engelleme (sahte RST) | ✅ tüm profillerde varsayılan; art arda gelen RST'lerin **hepsini** düşürür (TTL ayrımı opsiyonel — ölçümde DPI'ın TTL taklit ettiği görüldü) |
 | `-r` `Host:` → `hOsT:` | ✅ |
 | `-m` Host değerinde harf karıştırma | ✅ |
 | `-s` + `-a` boşluk taşıma | ✅ **çift olarak** (uzunluk korunur, TCP akışı bozulmaz) |
