@@ -75,7 +75,32 @@ Motor, WinDivert filtresi sayesinde çekirdekten yalnızca **ilgili paketleri** 
 3. **Ters sıralı gönderim** — segmentler son parçadan başlayarak gönderilir; yalnızca ilk segmente bakan DPI motorları akışı hiç eşleştiremez.
 4. **QUIC kapatma (opsiyonel)** — UDP/443 düşürülerek tarayıcılar TCP+TLS'e döner, böylece yukarıdaki adımlar bu trafiğe de uygulanır.
 
-İSS profillerine göre hazır stratejiler `dpi_engine.PRESETS` içinde tanımlıdır: `superonline`, `ttnet`, `vodafone`, `general` ve yalnızca Discord alan adlarına dokunan `discord_only`.
+İSS profillerine göre hazır stratejiler `dpi_engine.PRESETS` içinde tanımlıdır ve strateji bulucu bunları en hafiften en agresife doğru dener:
+
+`vodafone` → `general` → `ttnet` → `superonline` → `hardened` → `maximum` → `native_frag`
+
+Ayrıca yalnızca Discord alan adlarına dokunan `discord_only` profili vardır.
+
+### GoodbyeDPI ile karşılaştırma
+
+Motor, GoodbyeDPI'nin HTTPS/SNI tekniklerinin tamamını kendi kodumuzla uygular; kapsamı dürüstçe belirtmek gerekirse:
+
+| GoodbyeDPI özelliği | Bu uygulamada |
+|---|---|
+| `-e` / `-f` ClientHello parçalama | ✅ SNI **içinden** bölme (sabit ofsetten güçlü) |
+| `--reverse-frag` ters sıra | ✅ |
+| `--wrong-seq` pencere dışı sahte paket | ✅ varsayılan |
+| `--wrong-chksum` bozuk sağlamalı sahte paket | ✅ (badseq ile birlikte) |
+| `--auto-ttl` otomatik TTL | ✅ gelen SYN-ACK'ten mesafe öğrenilir |
+| `--native-frag` IP katmanında parçalama | ✅ `native_frag` profili |
+| `-p` pasif DPI engelleme (sahte RST) | ✅ tüm profillerde varsayılan, üstelik **TTL mesafesiyle** gerçek RST'den ayırt eder |
+| `-r` `Host:` → `hOsT:` | ✅ |
+| `-m` Host değerinde harf karıştırma | ✅ |
+| `-s` + `-a` boşluk taşıma | ✅ **çift olarak** (uzunluk korunur, TCP akışı bozulmaz) |
+| `--blacklist` alan adı listesi | ✅ `%APPDATA%\DiscordDNS\blacklist.txt` |
+| `--dns-addr` DNS yönlendirme | ✅ yerine şifreli yerel DoH çözümleyici |
+| `-k` HTTP isteğini N parçaya bölme | ➖ TLS bölme mevcut, HTTP için ayrı parçalama yok |
+| Windows servisi olarak kurulum | ➖ uygulama açıkken çalışır |
 
 ### Performans
 
@@ -83,7 +108,7 @@ Motor, çekirdek filtresi sayesinde yalnızca ClientHello ve HTTP isteklerini ku
 
 | Ölçüm | Sonuç |
 |---|---|
-| ClientHello başına işlem maliyeti | **16.5 mikrosaniye** (~60.000 yeni bağlantı/sn kapasite) |
+| ClientHello başına işlem maliyeti | **~150-200 mikrosaniye** (sahte paket üretimi ve sağlama hesabı dahil, gerçek kod yolunda ölçüldü) |
 | Toplu veri trafiğine etkisi | **yok** — çekirdek hızlı yolunda kalır |
 | DNS: modem (şifresiz) | ~17 ms |
 | DNS: yerel DoH (şifreli) | ~15 ms |
@@ -105,6 +130,44 @@ python -m tests.test_dpi_live
 ```
 
 `test_dpi_live`, motoru açıp gerçek TLS bağlantıları kurar, kaç paketin yeniden yazıldığını raporlar, sonra motoru kapatıp arkada bir şey kalmadığını doğrular.
+
+---
+
+## 🩺 Bağlanamadığında Nedenini Söyler
+
+Uygulama "bağlanamadı" demekle yetinmez; engeli **katman katman** ölçüp mekanizmayı adıyla söyler:
+
+| Teşhis | Anlamı | Çözümü |
+|---|---|---|
+| `dns_hijack` | İSS DNS yanıtını engel sunucusuna çeviriyor | Kanal 2 (şifreli DNS) |
+| `sni_rst` | TCP kuruluyor, alan adı görülünce sahte RST geliyor | Kanal 3 (DPI motoru) |
+| `sni_timeout` | Alan adı görülünce paketler sessizce yutuluyor | Kanal 3 |
+| `tcp_blocked` | Sunucuya TCP hiç kurulamıyor (IP/port engeli) | DPI motoru çözemez |
+| `mitm` | Sahte sertifika sunuluyor | Kanal 2 |
+
+Örnek log çıktısı:
+
+```
+🔎 Erişim sorunu teşhisi: SNI ENGELİ: TCP bağlantısı kuruluyor, ancak İSS alan
+   adını (discord.com) görür görmez bağlantıyı sahte bir RST paketiyle kesiyor.
+    · Sistem DNS'i (172.20.10.1) → 195.175.254.2, gerçek adres → 162.159.128.233
+    · TCP 162.159.128.233:443 → açık
+    · ClientHello gönderildikten hemen sonra RST geldi
+↪ Öneri: Kanal 3 (DPI Bypass) veya 🎯 Strateji Bul.
+```
+
+Farklı IP + geçerli sertifika durumunu **CDN farkı** olarak ayırt eder, boş yere "kaçırma" demez.
+
+### Kendi alan adı listeniz
+
+`%APPDATA%\DiscordDNS\blacklist.txt` dosyası oluşturursanız motor **yalnızca** oradaki alan adlarına dokunur, geri kalan tüm trafiğinize hiç karışmaz:
+
+```text
+# satır başına bir alan adı, # ile yorum
+discord.com
+discord.gg
+discordapp.net
+```
 
 ---
 

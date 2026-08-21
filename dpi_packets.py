@@ -313,6 +313,91 @@ def ipv4_checksum(header: bytes) -> int:
     return (~total) & 0xFFFF
 
 
+def _ones_complement_sum(data: bytes) -> int:
+    if len(data) % 2:
+        data += b"\x00"
+    total = 0
+    for i in range(0, len(data), 2):
+        total += struct.unpack_from("!H", data, i)[0]
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return total
+
+
+def tcp_checksum(packet: bytes, pkt: TcpPacket) -> int:
+    """
+    Compute the TCP checksum over the pseudo-header plus the whole segment.
+
+    Needed for IP fragmentation: once a packet is split into IP fragments only
+    the first one carries a TCP header, so the driver can no longer work the
+    checksum out for us — it has to be final before the split happens.
+    """
+    segment = bytearray(packet[pkt.tcp_off:])
+    struct.pack_into("!H", segment, 16, 0)          # zero the checksum field
+
+    if pkt.version == 4:
+        pseudo = pkt.src_ip + pkt.dst_ip + bytes([0, PROTO_TCP]) + struct.pack("!H", len(segment))
+    else:
+        pseudo = (pkt.src_ip + pkt.dst_ip + struct.pack("!I", len(segment))
+                  + bytes([0, 0, 0, PROTO_TCP]))
+
+    total = _ones_complement_sum(pseudo) + _ones_complement_sum(bytes(segment))
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
+
+
+def seal_checksums(packet: bytearray, pkt: TcpPacket) -> bytearray:
+    """Write final, correct IPv4 and TCP checksums into a rebuilt packet."""
+    checksum = tcp_checksum(bytes(packet), pkt)
+    struct.pack_into("!H", packet, pkt.tcp_off + 16, checksum)
+    if pkt.version == 4:
+        struct.pack_into("!H", packet, 10, 0)
+        struct.pack_into("!H", packet, 10, ipv4_checksum(bytes(packet[:pkt.ip_hlen])))
+    return packet
+
+
+def fragment_ipv4(packet: bytes, first_payload_len: int) -> List[bytearray]:
+    """
+    Split one IPv4 packet into two genuine IP fragments.
+
+    This is a different axis of attack from TCP segmentation: a DPI box that
+    reassembles TCP streams may still refuse to reassemble IP fragments, and one
+    that does neither sees only the first fragment. `first_payload_len` is the
+    number of IP-payload bytes in the first fragment and must be a multiple of 8,
+    as the fragment offset field counts in 8-byte units.
+
+    Checksums must already be final (see seal_checksums) — the second fragment
+    has no TCP header for anything downstream to work from.
+    """
+    if len(packet) < 20 or (packet[0] >> 4) != 4:
+        return [bytearray(packet)]
+
+    ip_hlen = (packet[0] & 0x0F) * 4
+    body = packet[ip_hlen:]
+    split = (first_payload_len // 8) * 8
+    if split <= 0 or split >= len(body):
+        return [bytearray(packet)]
+
+    original_flags = struct.unpack_from("!H", packet, 6)[0]
+    base_offset = original_flags & 0x1FFF
+    header = bytes(packet[:ip_hlen])
+
+    def build(chunk: bytes, offset_units: int, more: bool) -> bytearray:
+        out = bytearray(header) + bytearray(chunk)
+        struct.pack_into("!H", out, 2, len(out))
+        flags = (offset_units & 0x1FFF) | (0x2000 if more else 0)   # MF bit
+        struct.pack_into("!H", out, 6, flags)
+        struct.pack_into("!H", out, 10, 0)
+        struct.pack_into("!H", out, 10, ipv4_checksum(bytes(out[:ip_hlen])))
+        return out
+
+    return [
+        build(body[:split], base_offset, True),
+        build(body[split:], base_offset + split // 8, False),
+    ]
+
+
 def build_segment(pkt: TcpPacket, payload: bytes, seq: int,
                   ttl: Optional[int] = None,
                   ip_id: Optional[int] = None,
@@ -364,6 +449,39 @@ def finalize_badsum(packet: bytearray, pkt: TcpPacket) -> bytearray:
 
 DECOY_HOSTS = (b"www.microsoft.com", b"www.bing.com", b"www.wikipedia.org", b"outlook.office.com")
 
+_LABEL_ALPHABET = b"abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def decoy_hostname(length: int) -> bytes:
+    """
+    Produce a syntactically valid hostname of an exact length.
+
+    Padding a fixed domain by repetition used to emit things like
+    "www.microsoft.comw" — not a hostname any client would send, and exactly the
+    kind of oddity a DPI box can fingerprint. This builds a real-looking name
+    instead: a random label under a plausible TLD, sized to fit.
+    """
+    if length <= 0:
+        return b""
+    for candidate in DECOY_HOSTS:
+        if len(candidate) == length:
+            return candidate
+
+    # Longest suffix that still leaves at least one character for the label, so
+    # even a very short SNI (a.io is four bytes) yields a well-formed name.
+    for tld in (b".com", b".net", b".org", b".io", b".co"):
+        if length >= len(tld) + 1:
+            label_len = length - len(tld)
+            label = bytes(_LABEL_ALPHABET[b % len(_LABEL_ALPHABET)]
+                          for b in os.urandom(label_len))
+            return label + tld
+
+    if length >= 3:
+        filler = bytes(_LABEL_ALPHABET[b % len(_LABEL_ALPHABET)] for b in os.urandom(length - 2))
+        return filler[:length - 2] + b"." + filler[:1] if length > 3 else b"a.b"
+
+    return bytes(_LABEL_ALPHABET[b % len(_LABEL_ALPHABET)] for b in os.urandom(length))
+
 
 def make_decoy_payload(payload: bytes, host_span: Optional[Tuple[int, int]] = None) -> bytes:
     """
@@ -377,9 +495,7 @@ def make_decoy_payload(payload: bytes, host_span: Optional[Tuple[int, int]] = No
     if host_span:
         off, length = host_span
         if 0 < length and off + length <= len(payload):
-            filler = DECOY_HOSTS[os.urandom(1)[0] % len(DECOY_HOSTS)]
-            replacement = (filler * (length // len(filler) + 1))[:length]
-            return bytes(payload[:off]) + replacement + bytes(payload[off + length:])
+            return bytes(payload[:off]) + decoy_hostname(length) + bytes(payload[off + length:])
 
     body = os.urandom(max(0, len(payload) - 5))
     return bytes([TLS_RECORD_HANDSHAKE, 0x03, 0x01]) + struct.pack("!H", len(body)) + body
@@ -393,3 +509,69 @@ def mangle_http_host_header(payload: bytes, name_off: int) -> bytes:
     if name_off + 4 > len(payload):
         return payload
     return payload[:name_off] + b"hOsT" + payload[name_off + 4:]
+
+
+def mix_host_case(payload: bytes) -> bytes:
+    """
+    Randomise the case of the Host header's *value* (dIsCoRd.CoM).
+
+    Host names are case-insensitive to servers and resolvers, so this is
+    harmless, but a DPI box comparing raw bytes against a blocklist misses it.
+    """
+    found = extract_http_host(payload)
+    if not found:
+        return payload
+    host, name_off, _ = found
+    value_start = payload.find(b":", name_off) + 1
+    while value_start < len(payload) and payload[value_start:value_start + 1] == b" ":
+        value_start += 1
+    value_end = value_start + len(host)
+    if value_end > len(payload):
+        return payload
+
+    mixed = bytes(
+        (c ^ 0x20) if (0x61 <= c <= 0x7A or 0x41 <= c <= 0x5A) and (i % 2 == 0) else c
+        for i, c in enumerate(payload[value_start:value_end])
+    )
+    return payload[:value_start] + mixed + payload[value_end:]
+
+
+def swap_http_spaces(payload: bytes) -> bytes:
+    """
+    Move one space: add one after the request method, remove the one after
+    `Host:`. GoodbyeDPI exposes these as -a and -s.
+
+    They are applied as a pair on purpose. Each on its own changes the request's
+    length, which would desynchronise every following packet's sequence number
+    because the rest of the stream is numbered from the original payload. Doing
+    both keeps the byte count identical, so the stream stays consistent.
+    """
+    method_end = payload.find(b" ")
+    if method_end < 0:
+        return payload
+
+    found = extract_http_host(payload)
+    if not found:
+        return payload
+    _, name_off, _ = found
+    colon = payload.find(b":", name_off)
+    if colon < 0 or payload[colon + 1:colon + 2] != b" ":
+        return payload            # no space to give back — leave length alone
+
+    without_space = payload[:colon + 1] + payload[colon + 2:]
+    return without_space[:method_end] + b" " + without_space[method_end:]
+
+
+def apply_http_tricks(payload: bytes, mangle_name: bool = True,
+                      mix_case: bool = False, swap_spaces: bool = False) -> bytes:
+    """Apply the enabled HTTP header tricks, all of them length-preserving."""
+    out = payload
+    if mangle_name:
+        found = extract_http_host(out)
+        if found:
+            out = mangle_http_host_header(out, found[1])
+    if mix_case:
+        out = mix_host_case(out)
+    if swap_spaces:
+        out = swap_http_spaces(out)
+    return out if len(out) == len(payload) else payload

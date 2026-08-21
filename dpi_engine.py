@@ -23,6 +23,7 @@ unloads its driver when the last handle is gone.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -81,8 +82,11 @@ class DpiConfig:
     block_rst: bool = False        # drop the forged RST a DPI box sends to kill
                                    # a connection it could not classify
     rst_window_s: float = 4.0      # only for flows we just rewrote, and only briefly
+    native_frag: bool = False      # split at the IP layer instead of the TCP one
     handle_http: bool = True       # also rewrite plain HTTP requests
     http_mangle: bool = True       # `Host:` → `hOsT:`
+    http_mix_case: bool = False    # dIsCoRd.CoM in the Host value
+    http_swap_spaces: bool = False # move a space from `Host:` to after the method
     block_quic: bool = False       # drop UDP/443 so browsers fall back to TCP TLS
     hostnames: Tuple[str, ...] = ()  # empty → every host; otherwise suffix match
 
@@ -145,14 +149,50 @@ PRESETS: Dict[str, DpiConfig] = {
         split_position=1, split_at_sni=True, reverse_order=True,
         decoy=True, decoy_fooling=("badseq", "badsum"), auto_ttl=True,
         auto_ttl_margin=2, block_rst=True, block_quic=True,
+        http_mangle=True, http_mix_case=True, http_swap_spaces=True,
+    ),
+    "native_frag": DpiConfig(
+        name="IP Parçalama",
+        description="TCP yerine IP katmanında parçalar — TCP akışını birleştiren ama "
+                    "IP parçalarını birleştirmeyen DPI kutuları için",
+        split_position=2, split_at_sni=True, reverse_order=False,
+        native_frag=True, decoy=True, block_rst=True, auto_ttl=True, block_quic=True,
+        http_mangle=True, http_mix_case=True, http_swap_spaces=True,
     ),
 }
 
 # Tried in this order by the strategy finder: cheapest and least invasive first,
 # so a line that only needs a nudge never ends up on the heavy-handed profile.
 AGGRESSION_LADDER: Tuple[str, ...] = (
-    "vodafone", "general", "ttnet", "superonline", "hardened", "maximum",
+    "vodafone", "general", "ttnet", "superonline", "hardened", "maximum", "native_frag",
 )
+
+
+def load_hostname_list(path: Optional[str] = None) -> Tuple[str, ...]:
+    """
+    Read a domain list (GoodbyeDPI's --blacklist) from
+    %APPDATA%\\DiscordDNS\\blacklist.txt, one domain per line, # for comments.
+
+    When the file exists, the engine only touches those domains and leaves the
+    rest of the machine's traffic completely alone.
+    """
+    if path is None:
+        appdata = os.environ.get("APPDATA", os.path.expanduser("~"))
+        path = os.path.join(appdata, "DiscordDNS", "blacklist.txt")
+
+    try:
+        if not os.path.isfile(path):
+            return ()
+        domains = []
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                entry = line.split("#", 1)[0].strip().lower().lstrip(".")
+                if entry:
+                    domains.append(entry)
+        return tuple(dict.fromkeys(domains))
+    except Exception as e:
+        logger.warning("Kara liste okunamadı (%s): %s", path, e)
+        return ()
 
 
 # ─── Statistics ──────────────────────────────────────────────────────────────────
@@ -168,6 +208,8 @@ class EngineStats:
     errors: int = 0
     rst_blocked: int = 0
     hops_learned: int = 0
+    native_frags: int = 0
+    process_us_total: float = 0.0
     last_hosts: Deque[str] = field(default_factory=lambda: deque(maxlen=25))
 
     def snapshot(self) -> dict:
@@ -182,6 +224,11 @@ class EngineStats:
             "errors": self.errors,
             "rst_blocked": self.rst_blocked,
             "hops_learned": self.hops_learned,
+            "native_frags": self.native_frags,
+            # Measured inside the live path, driver syscalls included — the
+            # microbenchmark that excluded them was not a real cost figure.
+            "avg_process_us": round(self.process_us_total / self.packets_rewritten, 1)
+                              if self.packets_rewritten else 0.0,
             "last_hosts": list(self.last_hosts),
         }
 
@@ -225,6 +272,14 @@ class NativeDpiEngine:
             return True, f"Yerel DPI motoru zaten çalışıyor ({self.config.name})."
 
         self._stop.clear()
+
+        # A user-supplied domain list narrows the engine to those hosts only
+        if not self.config.hostnames:
+            listed = load_hostname_list()
+            if listed:
+                self.config = DpiConfig(**{**self.config.__dict__, "hostnames": listed})
+                logger.info("Kara liste uygulandı: %d alan adı", len(listed))
+
         try:
             self._tcp_handle = wd.WinDivertHandle(TCP_FILTER, priority=-1000).open()
         except wd.WinDivertError as e:
@@ -466,6 +521,8 @@ class NativeDpiEngine:
 
     def _handle_packet(self, handle: wd.WinDivertHandle, packet: bytearray,
                        addr: wd.WinDivertAddress) -> None:
+        started_at = time.perf_counter()
+
         # Second line of defence behind the `!impostor` filter: never re-split a
         # packet this engine itself injected.
         pkt = dp.parse_tcp_packet(packet) if not addr.impostor else None
@@ -497,8 +554,13 @@ class NativeDpiEngine:
             return
 
         payload = pkt.payload
-        if kind == "http" and self.config.http_mangle and span:
-            payload = dp.mangle_http_host_header(payload, span[0])
+        if kind == "http":
+            payload = dp.apply_http_tricks(
+                payload,
+                mangle_name=self.config.http_mangle,
+                mix_case=self.config.http_mix_case,
+                swap_spaces=self.config.http_swap_spaces,
+            )
 
         positions = dp.choose_split_positions(
             payload, self.config.split_position, self.config.split_at_sni
@@ -534,21 +596,58 @@ class NativeDpiEngine:
             if sent:
                 self.stats.decoys_sent += 1
 
-        # 2) the real payload, cut apart (optionally out of order)
-        ordered: List[Tuple[int, bytes]] = list(segments)
-        if self.config.reverse_order:
-            ordered.reverse()
+        # 2) the real payload — either as IP fragments or as TCP segments
+        if self.config.native_frag and pkt.version == 4:
+            self._send_ip_fragments(handle, pkt, payload, positions, addr)
+        else:
+            ordered: List[Tuple[int, bytes]] = list(segments)
+            if self.config.reverse_order:
+                ordered.reverse()
 
-        for rel_offset, chunk in ordered:
-            seg = dp.build_segment(pkt, chunk, pkt.seq + rel_offset,
-                                   ip_id=self._next_ip_id())
-            if handle.send(seg, addr.copy()):
-                self.stats.segments_sent += 1
+            for rel_offset, chunk in ordered:
+                seg = dp.build_segment(pkt, chunk, pkt.seq + rel_offset,
+                                       ip_id=self._next_ip_id())
+                if handle.send(seg, addr.copy()):
+                    self.stats.segments_sent += 1
 
         self._remember_flow(pkt)
         self.stats.packets_rewritten += 1
+        self.stats.process_us_total += (time.perf_counter() - started_at) * 1e6
         if host:
             self.stats.last_hosts.append(host)
+
+    def _send_ip_fragments(self, handle: wd.WinDivertHandle, pkt: "dp.TcpPacket",
+                           payload: bytes, positions: List[int],
+                           addr: wd.WinDivertAddress) -> None:
+        """
+        Send the request as genuine IP fragments instead of TCP segments.
+
+        A DPI box that reassembles TCP streams may still refuse to reassemble IP
+        fragments — and one that inspects only the first fragment never sees the
+        hostname at all. Checksums are finalised before the split because the
+        second fragment carries no TCP header for the driver to work from.
+        """
+        segment = dp.build_segment(pkt, payload, pkt.seq, ip_id=self._next_ip_id())
+        dp.seal_checksums(segment, pkt)
+
+        # Cut inside the hostname: the SNI position, expressed in IP-payload
+        # bytes, rounded down to the 8-byte unit the offset field uses.
+        cut = positions[-1] if positions else 2
+        first_len = pkt.tcp_hlen + cut
+
+        fragments = dp.fragment_ipv4(bytes(segment), first_len)
+        if len(fragments) < 2:
+            if handle.send_precomputed(segment, addr.copy()):
+                self.stats.segments_sent += 1
+            return
+
+        if self.config.reverse_order:
+            fragments.reverse()
+
+        for fragment in fragments:
+            if handle.send_precomputed(fragment, addr.copy()):
+                self.stats.segments_sent += 1
+        self.stats.native_frags += 1
 
 
 # ─── Module-level singleton (mirrors the old goodbyedpi process handling) ────────
