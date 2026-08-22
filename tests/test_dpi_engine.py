@@ -521,6 +521,61 @@ def test_http_tricks_and_blacklist():
     check("liste yoksa boş döner", dpi_engine.load_hostname_list("yok-boyle-bir-dosya.txt") == ())
 
 
+def test_heartbeat_detection():
+    print("\n[11/11] Kopma tespiti (hız ve doğruluk)")
+    import heartbeat_guard as hg
+
+    guard = hg.HeartbeatGuard()
+
+    # Timing: idle stays cheap, protection is watched closely, a failed check is
+    # confirmed within seconds instead of a whole cycle later.
+    guard.is_dns_active = False
+    guard.consecutive_failures = 0
+    check("koruma kapalıyken seyrek kontrol", guard._next_delay() == hg.HEARTBEAT_INTERVAL_S,
+          f"got {guard._next_delay()}")
+
+    guard.is_dns_active = True
+    check("koruma açıkken sık kontrol", guard._next_delay() == hg.ACTIVE_INTERVAL_S,
+          f"got {guard._next_delay()}")
+
+    guard.consecutive_failures = 1
+    check("başarısızlıktan sonra hızlı doğrulama",
+          guard._next_delay() == hg.CONFIRM_DELAY_S, f"got {guard._next_delay()}")
+
+    budget = guard.get_status()["detection_budget_s"]
+    check("tespit bütçesi 15 saniyenin altında", budget <= 15, f"got {budget}s")
+    check("eski 50 saniyelik bütçeden belirgin iyileşme",
+          budget < hg.HEARTBEAT_INTERVAL_S * hg.FAILURE_THRESHOLD,
+          f"{budget}s vs {hg.HEARTBEAT_INTERVAL_S * hg.FAILURE_THRESHOLD}s")
+
+    # Accuracy: the probe must reflect a real handshake, not a bare TCP connect.
+    # Measured on live lines, the TCP check was wrong in both directions.
+    import strategy_finder as sf
+
+    original = sf.probe_host
+    try:
+        sf.probe_host = lambda host, timeout=6.0, resolve_over_doh=True: sf.ProbeResult(
+            host, False, 120.0, "ConnectionResetError: reset by peer")
+        result = guard.probe()
+        check("SNI reseti kopma olarak görülüyor", result["ok"] is False)
+        check("teşhis metni taşınıyor", "SNI" in result.get("diagnosis", ""),
+              result.get("diagnosis"))
+
+        sf.probe_host = lambda host, timeout=6.0, resolve_over_doh=True: sf.ProbeResult(
+            host, True, 42.0, "TLSv1.3")
+        result = guard.probe()
+        check("gerçek el sıkışma başarılı sayılıyor", result["ok"] is True)
+        check("gecikme ölçülüyor", result["ping_ms"] == 42, f"got {result['ping_ms']}")
+
+        def explode(host, timeout=6.0, resolve_over_doh=True):
+            raise RuntimeError("sonda kullanılamıyor")
+        sf.probe_host = explode
+        fallback = guard.probe()
+        check("sonda çökerse TCP kontrolüne düşülüyor", "ok" in fallback)
+    finally:
+        sf.probe_host = original
+
+
 def run_tests():
     print("=" * 62)
     print("  DISCORD DNS v3.6 -- NATIVE DPI ENGINE TEST SUITE")
@@ -536,6 +591,7 @@ def run_tests():
     test_finder_and_diagnostics()
     test_native_fragmentation()
     test_http_tricks_and_blacklist()
+    test_heartbeat_detection()
 
     print("\n" + "=" * 62)
     print(f"  {PASSED} passed, {FAILED} failed")

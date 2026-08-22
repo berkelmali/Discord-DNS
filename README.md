@@ -166,7 +166,11 @@ Tek buton, beş durum — ve her ikisi de **doğrulanır**:
 
 **BAĞLANTIYI KES** motorları durdurur, **kendi orijinal DNS sunucularınızı** geri yükler (DHCP'ye değil) ve sonra **doğrular**: motor gerçekten durdu mu, çözümleyici kapandı mı, ağ kartı hâlâ `127.0.0.1`'e mi bakıyor. Eksik kalan bir şey varsa açıkça söyler.
 
-**Otomatik toparlama:** Bağlıyken İSS davranışını değiştirirse (heartbeat üst üste başarısız olursa) uygulama kendi kendine çalışan yeni bir strateji arar ve ona geçer — siz hiçbir şey yapmadan.
+**Otomatik toparlama:** Bağlıyken İSS davranışını değiştirirse uygulama kendi kendine çalışan yeni bir strateji arar ve ona geçer — siz hiçbir şey yapmadan.
+
+**Kopma tespiti ~12 saniye.** Koruma açıkken kontrol aralığı 10 saniyeye iner ve başarısız bir kontrol tam tur beklemeden 2 saniye içinde doğrulanır (önceden iki adet 25 saniyelik tur, yani ~50 saniye).
+
+Kontrolün kendisi de değişti: eskiden yalnızca TCP bağlantısı kuruluyordu, bu da Türkiye hatlarında **iki yönde birden yanlış** sonuç veriyordu — DNS kaçırılan hatta bağlantı engel sunucusuna oturup "çalışıyor" diyordu, engel sunucusuna erişilemeyen hatta ise uygulamanın kendi şifreli yolu sorunsuz çalışırken "koptu" diyordu. Artık şifreli DNS ile çözülmüş gerçek adrese tam TLS el sıkışması yapılır ve başarısızlığın nedeni (SNI reseti / DNS kaçırma / zaman aşımı) günlüğe yazılır.
 
 **DPI profili seçici:** VPN'lerdeki sunucu listesi gibi; `Otomatik (İSS'ye göre)` bırakabilir ya da dokuz profilden birini elle seçebilirsiniz.
 

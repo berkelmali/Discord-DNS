@@ -1114,11 +1114,15 @@ class DiscordDNSApp(ctk.CTk):
             self.hb_fails.configure(text=f"Hata: {failures}")
             self.hb_preset.configure(text=preset)
 
+            diagnosis = data.get("diagnosis", "")
             if ok:
                 self.hb_led.configure(text="●  Aktif", text_color=GREEN)
                 self._recovery_running = False
             else:
                 self.hb_led.configure(text=f"●  Hata ({failures}x)", text_color=RED)
+                # Say what went wrong, not just that something did
+                if diagnosis and failures == 1:
+                    self.log(f"💓 Bağlantı kontrolü başarısız: {diagnosis}")
                 self._maybe_auto_recover(failures)
 
         elif event == "failover":
@@ -1483,6 +1487,7 @@ class DiscordDNSApp(ctk.CTk):
         # 3) Verify — the part that makes "connected" mean something
         self._ui(self.log, "\n".join(messages))
         self._ui(self.log, "🔍 Bağlantı doğrulanıyor…")
+        self._set_progress("Hedeflere gerçek bağlantı deneniyor…")
         results = [strategy_finder.probe_host(host) for host in strategy_finder.DEFAULT_TARGETS]
         blocked = [r for r in results if not r.ok]
 
@@ -1500,7 +1505,8 @@ class DiscordDNSApp(ctk.CTk):
                        f"⚠ {len(blocked)} hedef hâlâ kapalı — çalışan strateji aranıyor…")
             report = strategy_finder.find_best_strategy(
                 targets=tuple(r.host for r in blocked),
-                on_progress=lambda line: self._ui(self.log, line),
+                on_progress=lambda line: (self._ui(self.log, line),
+                                          self._set_progress(line.strip())),
             )
             if report.best is not None:
                 applied_ok, applied_msg = strategy_finder.apply_report(report)
@@ -2049,9 +2055,19 @@ class DiscordDNSApp(ctk.CTk):
         self.log("🎯 Otomatik strateji taraması başlatıldı…")
         threading.Thread(target=self._do_strategy_scan, daemon=True).start()
 
+    def _set_progress(self, text: str):
+        """Show what a long operation is doing, next to the connection state."""
+        def apply():
+            try:
+                self.conn_detail_lbl.configure(text=text[:70])
+            except Exception:
+                pass
+        self._ui(apply)
+
     def _do_strategy_scan(self):
         def progress(message):
             self._ui(self.log, message)
+            self._set_progress(message.strip())
 
         try:
             report = strategy_finder.find_best_strategy(on_progress=progress)

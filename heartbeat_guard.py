@@ -18,11 +18,23 @@ logger = logging.getLogger("HeartbeatGuard")
 
 # ─── Configuration ────────────────────────────────────────────────────────────────
 
-# Seconds between heartbeat checks (20–30 s recommended)
+# Seconds between checks when nothing of ours is applied
 HEARTBEAT_INTERVAL_S: int = 25
+
+# Seconds between checks while protection is on. Detection used to take two
+# 25-second cycles — roughly 50 seconds of broken Discord before anything
+# reacted. Checking more often only while we are actually protecting keeps the
+# idle cost unchanged.
+ACTIVE_INTERVAL_S: int = 10
+
+# After a failed check, confirm quickly instead of waiting a whole cycle
+CONFIRM_DELAY_S: int = 2
 
 # How many consecutive failures before triggering failover
 FAILURE_THRESHOLD: int = 2
+
+# What a check is allowed to take before it counts as a failure
+PROBE_TIMEOUT_S: float = 5.0
 
 # Failover chain: if current preset fails, try the next one in order
 FAILOVER_CHAIN: list[str] = ["Cloudflare", "Google", "Quad9"]
@@ -56,11 +68,20 @@ class HeartbeatGuard:
         on_status_change: Optional[Callable[[str, dict], None]] = None,
         interval: int = HEARTBEAT_INTERVAL_S,
         failure_threshold: int = FAILURE_THRESHOLD,
+        active_interval: int = ACTIVE_INTERVAL_S,
+        confirm_delay: int = CONFIRM_DELAY_S,
+        probe_timeout: float = PROBE_TIMEOUT_S,
+        target_host: str = "discord.com",
     ):
         self.adapter_name      = adapter_name
         self.on_status_change  = on_status_change or (lambda e, d: None)
         self.interval          = interval
         self.failure_threshold = failure_threshold
+        self.active_interval   = active_interval
+        self.confirm_delay     = confirm_delay
+        self.probe_timeout     = probe_timeout
+        self.target_host       = target_host
+        self.last_diagnosis    = ""
 
         self._stop_event       = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -106,20 +127,64 @@ class HeartbeatGuard:
             "consecutive_failures": self.consecutive_failures,
             "current_preset":       FAILOVER_CHAIN[self.current_preset_index],
             "interval":             self.interval,
+            "active_interval":      self.active_interval,
+            "last_diagnosis":       self.last_diagnosis,
+            "detection_budget_s":   self.active_interval + self.confirm_delay
+                                    * max(0, self.failure_threshold - 1),
         }
 
     # ── Internal Loop ─────────────────────────────────────────────────────────────
 
     def _run_loop(self):
-        """Main heartbeat loop — runs every self.interval seconds."""
+        """Main heartbeat loop — the gap between checks depends on the state."""
         while not self._stop_event.is_set():
             self._tick()
-            # Interruptible sleep: wakes up immediately if stop() is called
-            self._stop_event.wait(timeout=self.interval)
+            self._stop_event.wait(timeout=self._next_delay())
+
+    def _next_delay(self) -> float:
+        """
+        Check often when it matters, rarely when it does not.
+
+        A failed check is confirmed within a couple of seconds rather than a
+        whole cycle later, so a real outage is recognised in about twelve
+        seconds instead of fifty.
+        """
+        if self.consecutive_failures:
+            return self.confirm_delay
+        if self.is_dns_active:
+            return self.active_interval
+        return self.interval
+
+    def probe(self) -> dict:
+        """
+        Decide whether Discord is genuinely reachable.
+
+        A bare TCP connect is not an answer to that question, and measurement
+        showed it wrong in both directions on Turkish lines: where DNS is
+        hijacked, the connect lands on the block server and reports success
+        while nothing works; where the block server is unroutable, the connect
+        fails and reports an outage even though the app's own encrypted path is
+        fine. A full TLS handshake against an address resolved out of band tests
+        what the user actually cares about.
+        """
+        try:
+            import strategy_finder
+            result = strategy_finder.probe_host(self.target_host, timeout=self.probe_timeout)
+            return {
+                "ok": result.ok,
+                "ping_ms": int(result.ms) if result.ok else -1,
+                "diagnosis": result.diagnosis,
+            }
+        except Exception as e:
+            logger.debug("TLS sondası kullanılamadı (%s), TCP kontrolüne dönülüyor", e)
+            fallback = discord_checker.heartbeat_ping()
+            fallback.setdefault("diagnosis", "TCP kontrolü")
+            return fallback
 
     def _tick(self):
-        """Single heartbeat tick: ping Discord and decide whether to failover."""
-        result = discord_checker.heartbeat_ping()
+        """Single heartbeat tick: check Discord and decide whether to failover."""
+        result = self.probe()
+        self.last_diagnosis = result.get("diagnosis", "")
 
         if result["ok"]:
             self.consecutive_failures = 0
@@ -128,6 +193,7 @@ class HeartbeatGuard:
                 "ping_ms":             result["ping_ms"],
                 "consecutive_failures": 0,
                 "preset":              FAILOVER_CHAIN[self.current_preset_index],
+                "diagnosis":           self.last_diagnosis,
             })
             logger.debug("Heartbeat OK — %d ms", result["ping_ms"])
 
@@ -138,6 +204,7 @@ class HeartbeatGuard:
                 "ping_ms":             -1,
                 "consecutive_failures": self.consecutive_failures,
                 "preset":              FAILOVER_CHAIN[self.current_preset_index],
+                "diagnosis":           self.last_diagnosis,
             })
             logger.warning("Heartbeat FAIL #%d", self.consecutive_failures)
 
