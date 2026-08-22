@@ -46,6 +46,7 @@ import admin_utils
 import heartbeat_guard
 import dns_benchmark
 import dpi_bypass
+import dpi_engine
 import doh_proxy
 import diagnostics
 import strategy_finder
@@ -144,6 +145,9 @@ class DiscordDNSApp(ctk.CTk):
         # State
         self._cleanup_done        = False
         self._last_block_kind     = None
+        self.connection_state     = "disconnected"
+        self.selected_profile     = None   # manual DPI profile override
+        self._recovery_running    = False  # auto-recovery in flight
         self.is_admin_user        = admin_utils.is_admin()
         self.adapters             = dns_manager.get_network_adapters()
         self.selected_adapter     = self.adapters[0] if self.adapters else "Wi-Fi"
@@ -357,7 +361,7 @@ class DiscordDNSApp(ctk.CTk):
     def _detect_isp_async(self):
         def _job():
             info = dpi_bypass.detect_isp()
-            self.after(0, self._apply_isp_info, info)
+            self._ui(self._apply_isp_info, info)
         threading.Thread(target=_job, daemon=True).start()
 
     def _apply_isp_info(self, info):
@@ -647,10 +651,34 @@ class DiscordDNSApp(ctk.CTk):
         self.preset_dropdown.set("Cloudflare")
         self.preset_dropdown.grid(row=1, column=1, sticky="ew", padx=(8, 4), pady=(4, 0))
 
+        # DPI profile picker — the equivalent of a VPN's server list. "Otomatik"
+        # lets the ISP detector choose, and the strategy scan can overwrite it
+        # with whatever measurably works on this line.
+        ctk.CTkLabel(sel, text="DPI PROFİLİ (Kanal 3)",
+                    font=ctk.CTkFont(family="Segoe UI Variable", size=10, weight="bold"),
+                    text_color=TEXT_MUTED).grid(row=2, column=0, sticky="w", padx=4, pady=(10, 0))
+
+        self.profile_dropdown = ctk.CTkOptionMenu(
+            sel,
+            values=["Otomatik (İSS'ye göre)"] + [
+                dpi_engine.PRESETS[name].name for name in dpi_engine.AGGRESSION_LADDER
+            ],
+            command=self.on_profile_change,
+            fg_color=SURFACE, button_color=BORDER,
+            button_hover_color=BORDER_GLOW,
+            dropdown_fg_color=PANEL,
+            dropdown_hover_color=SURFACE,
+            font=ctk.CTkFont(family="Segoe UI Variable", size=12),
+            height=34, corner_radius=10
+        )
+        self.profile_dropdown.set("Otomatik (İSS'ye göre)")
+        self.profile_dropdown.grid(row=3, column=0, columnspan=2, sticky="ew",
+                                   padx=4, pady=(4, 0))
+
         # Big Action Button
         self.action_btn = ctk.CTkButton(
             frame,
-            text="⚡  CLOUDFLARE DNS ETKİNLEŞTİR",
+            text="⚡  BAĞLAN",
             font=ctk.CTkFont(family="Segoe UI Variable", size=15, weight="bold"),
             height=52, corner_radius=12,
             fg_color=BLURPLE, hover_color=BLURPLE_DIM,
@@ -943,8 +971,8 @@ class DiscordDNSApp(ctk.CTk):
             TrayItem("Discord DNS v3.6", lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
             TrayItem("Pencereyi Aç / Göster",  self._tray_show_window),
-            TrayItem("DNS Durumunu Yenile",    lambda i, item: self.after(0, self.refresh_status)),
-            TrayItem("DNS Önbelleğini Temizle", lambda i, item: self.after(0, self.manual_flush_dns)),
+            TrayItem("DNS Durumunu Yenile",    lambda i, item: self._ui(self.refresh_status)),
+            TrayItem("DNS Önbelleğini Temizle", lambda i, item: self._ui(self.manual_flush_dns)),
             pystray.Menu.SEPARATOR,
             TrayItem("Çıkış",                  self._tray_exit),
         )
@@ -989,7 +1017,7 @@ class DiscordDNSApp(ctk.CTk):
 
     def _tray_show_window(self, icon=None, item=None):
         """Restore the main window from tray."""
-        self.after(0, self._do_show_window)
+        self._ui(self._do_show_window)
 
     def _do_show_window(self):
         """Bring window back to foreground."""
@@ -999,7 +1027,7 @@ class DiscordDNSApp(ctk.CTk):
 
     def _tray_exit(self, icon=None, item=None):
         """Full quit from tray menu — stops tray, restores DNS, destroys window."""
-        self.after(0, self.on_app_close)
+        self._ui(self.on_app_close)
 
     # ═══════════════════════════════════════════════════════════════════════════════
     #  HEARTBEAT GUARD
@@ -1028,7 +1056,7 @@ class DiscordDNSApp(ctk.CTk):
             self.log("Heartbeat Guard başlatıldı.")
 
     def _on_hb_event(self, event, data):
-        self.after(0, self._apply_hb, event, data)
+        self._ui(self._apply_hb, event, data)
 
     def _apply_hb(self, event, data):
         if event == "heartbeat":
@@ -1043,8 +1071,10 @@ class DiscordDNSApp(ctk.CTk):
 
             if ok:
                 self.hb_led.configure(text="●  Aktif", text_color=GREEN)
+                self._recovery_running = False
             else:
                 self.hb_led.configure(text=f"●  Hata ({failures}x)", text_color=RED)
+                self._maybe_auto_recover(failures)
 
         elif event == "failover":
             frm = data.get("from_preset", "?")
@@ -1072,7 +1102,7 @@ class DiscordDNSApp(ctk.CTk):
 
     def _do_region_scan(self):
         results = discord_checker.check_voice_regions()
-        self.after(0, self._apply_regions, results)
+        self._ui(self._apply_regions, results)
 
     def _apply_regions(self, results):
         for label, info in results.items():
@@ -1105,7 +1135,7 @@ class DiscordDNSApp(ctk.CTk):
     def _do_dns_benchmark(self):
         res = dns_benchmark.benchmark_all_providers()
         fastest_name, fastest_ms, _ = dns_benchmark.find_fastest_provider()
-        self.after(0, self._apply_benchmark_results, res, fastest_name)
+        self._ui(self._apply_benchmark_results, res, fastest_name)
 
     def _apply_benchmark_results(self, results, fastest_name):
         self.bench_btn.configure(text="⚡  En Hızlı DNS'i Bul & Seç", state="normal")
@@ -1142,7 +1172,7 @@ class DiscordDNSApp(ctk.CTk):
                     if adapters and adapters[0] != self._autopilot_last_adapter:
                         new_adapter = adapters[0]
                         self._autopilot_last_adapter = new_adapter
-                        self.after(0, self._on_adapter_auto_switched, new_adapter)
+                        self._ui(self._on_adapter_auto_switched, new_adapter)
                 except Exception:
                     pass
         threading.Thread(target=_loop, daemon=True).start()
@@ -1186,87 +1216,278 @@ class DiscordDNSApp(ctk.CTk):
         self.log(f"Kanal Değişti: {choice}")
         self._sync_action_button()
 
-    def _sync_action_button(self):
-        is_managed = self.user_dns_enabled and (
-            (self.dns_state and not self.dns_state.get("is_dhcp")) or
-            dpi_bypass.is_dpi_bypass_running() or
-            doh_proxy.is_running()
+    def _maybe_auto_recover(self, failures: int):
+        """
+        Re-establish protection without the user touching anything.
+
+        An ISP can change its DPI behaviour mid-session, and a strategy that
+        worked ten minutes ago can stop working. When the heartbeat keeps failing
+        while we are connected through the engine, look for a strategy that works
+        now instead of sitting there claiming to be connected.
+        """
+        if self.connection_state != "connected" or self._recovery_running:
+            return
+        if failures < 2 or "Kanal 3" not in self.active_channel:
+            return
+        if not self.is_admin_user:
+            return
+
+        self._recovery_running = True
+        self.log("🔄 Bağlantı bozuldu — çalışan strateji yeniden aranıyor…")
+
+        def worker():
+            try:
+                report = strategy_finder.find_best_strategy(
+                    on_progress=lambda line: self._ui(self.log, line)
+                )
+                if report.best is not None:
+                    ok, message = strategy_finder.apply_report(report)
+                    self.selected_profile = report.best.profile
+                    self._ui(self.log, message)
+                    if ok:
+                        self._ui(self.log,
+                                   f"✅ Toparlandı — {report.best.label} profiline geçildi.")
+                        return
+                self._ui(self.log, f"⚠ Toparlanamadı: {report.summary()}")
+                self._ui(self._set_connection_state, "error")
+            except Exception as e:
+                self._ui(self.log, f"✗ Otomatik toparlama başarısız: {e}")
+            finally:
+                self._ui(setattr, self, "_recovery_running", False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_profile_change(self, choice):
+        """Pick a specific DPI strategy, or hand the decision back to detection."""
+        if choice.startswith("Otomatik"):
+            self.selected_profile = None
+            self.log("DPI profili: otomatik (İSS tespitine göre)")
+            return
+        for name in dpi_engine.PRESETS:
+            if dpi_engine.PRESETS[name].name == choice:
+                self.selected_profile = name
+                config = dpi_engine.PRESETS[name]
+                self.log(f"DPI profili: {config.name} — {config.description}")
+                if self.connection_state == "connected":
+                    self.log("↪ Değişikliğin geçerli olması için bağlantıyı kesip yeniden bağlanın.")
+                return
+
+    def _ui(self, callback, *args):
+        """
+        Marshal a call onto the UI thread from a worker.
+
+        Tk refuses to be touched from another thread unless its main loop is
+        running, so a background job that finishes during startup or while the
+        window is being torn down would otherwise raise and kill that thread.
+        The work is best-effort by nature: if there is no UI left to update,
+        there is nothing to do.
+        """
+        try:
+            self.after(0, callback, *args)
+        except (RuntimeError, tk.TclError):
+            pass
+
+    def _is_protection_up(self) -> bool:
+        """True when anything of ours is currently applied to the system."""
+        return bool(
+            self.user_dns_enabled and (
+                (self.dns_state and not self.dns_state.get("is_dhcp")) or
+                dpi_bypass.is_dpi_bypass_running() or
+                doh_proxy.is_running()
+            )
         )
-        if is_managed:
-            self.action_btn.configure(
-                text="↩  ORİJİNAL DNS'E GERİ DÖN & TÜNELİ KAPAT",
-                fg_color=RED, hover_color=RED_DIM
-            )
-        else:
-            self.action_btn.configure(
-                text=f"⚡  {self.current_preset.upper()} DNS & KANAL ETKİNLEŞTİR",
-                fg_color=BLURPLE, hover_color=BLURPLE_DIM
-            )
+
+    def _sync_action_button(self):
+        # Never fight the state machine mid-transition, and do not quietly paper
+        # over an error state — if the connection came up but the block was not
+        # beaten, the button must keep saying so until the user acts.
+        if self.connection_state in ("connecting", "disconnecting"):
+            return
+        if self.connection_state == "error" and self._is_protection_up():
+            return
+        self._set_connection_state("connected" if self._is_protection_up() else "disconnected")
 
     def toggle_dns(self):
+        if self.connection_state in ("connecting", "disconnecting"):
+            return
+
         if not self.is_admin_user:
             messagebox.showwarning("Yönetici Gerekli",
                                    "DNS ve DPI tüneli değiştirmek için uygulamayı Yönetici olarak çalıştırın.")
             self.elevate_admin()
             return
 
-        is_managed = self.user_dns_enabled and (
-            (self.dns_state and not self.dns_state.get("is_dhcp")) or
-            dpi_bypass.is_dpi_bypass_running() or
-            doh_proxy.is_running()
-        )
-        self.action_btn.configure(state="disabled", text="⏳  İşlem yapılıyor...")
-        threading.Thread(target=self._do_toggle, args=(bool(is_managed),), daemon=True).start()
+        is_managed = self._is_protection_up()
+        self.action_btn.configure(state="disabled")
+        threading.Thread(target=self._do_toggle, args=(is_managed,), daemon=True).start()
 
     def _do_toggle(self, is_managed):
         if is_managed:
-            # Give the user their own DNS servers back, not a blanket DHCP reset
-            msg = self._restore_original_dns()
-            _, dpi_msg = dpi_bypass.stop_dpi_bypass()
-            _, doh_msg = doh_proxy.stop()
-            msg += f"\n{dpi_msg}\n{doh_msg}"
-            ok = True
-            label = "Orijinal DNS ayarlarınız geri yüklendi, motorlar kapatıldı"
-            is_enabling = False
+            self._do_disconnect()
         else:
-            use_doh = "Kanal 2" in self.active_channel or self.doh_enabled_var.get()
+            self._do_connect()
 
-            if use_doh:
-                # Kanal 2: our own local DoH resolver. The adapter points at it,
-                # so every lookup on the machine leaves encrypted over 443/TLS.
-                doh_ok, doh_msg = doh_proxy.start(self.current_preset)
-                if doh_ok:
-                    ok, msg = dns_manager.set_local_resolver_dns(self.selected_adapter)
-                    msg = f"{doh_msg}\n{msg}"
-                else:
-                    # Falling back to plain DNS is better than leaving the user offline
-                    ok, msg = dns_manager.set_preset_dns(self.selected_adapter, self.current_preset)
-                    msg = f"{doh_msg}\n↪ Şifresiz {self.current_preset} DNS'e geçildi.\n{msg}"
+    # ── connect ─────────────────────────────────────────────────────────────────
+
+    def _do_connect(self):
+        """
+        Bring protection up and *prove* it works before reporting success.
+
+        A VPN client that says "connected" while the traffic is still blocked is
+        worse than useless, so this applies the settings, then opens real TLS
+        connections to the targets. If they are still refused, it walks the
+        profile ladder until something measurably works, and only then reports a
+        connection.
+        """
+        self._set_connection_state("connecting")
+        self._ui(self.log, "⏳ Bağlanılıyor…")
+
+        use_doh = ("Kanal 2" in self.active_channel
+                   or "Kanal 3" in self.active_channel
+                   or self.doh_enabled_var.get())
+        messages = []
+
+        # 1) DNS layer
+        if use_doh:
+            doh_ok, doh_msg = doh_proxy.start(self.current_preset)
+            messages.append(doh_msg)
+            if doh_ok:
+                _, dns_msg = dns_manager.set_local_resolver_dns(self.selected_adapter)
+                messages.append(dns_msg)
             else:
-                ok, msg = dns_manager.set_preset_dns(self.selected_adapter, self.current_preset)
+                # Being offline is worse than being unencrypted
+                _, dns_msg = dns_manager.set_preset_dns(self.selected_adapter, self.current_preset)
+                messages.append(f"↪ Şifresiz {self.current_preset} DNS'e geçildi.\n{dns_msg}")
+        else:
+            _, dns_msg = dns_manager.set_preset_dns(self.selected_adapter, self.current_preset)
+            messages.append(dns_msg)
 
-            # Kanal 3: our own WinDivert packet engine (no goodbyedpi.exe process)
-            if "Kanal 3" in self.active_channel:
-                mode = dpi_bypass.resolve_mode(self.isp_info)
-                dpi_ok, dpi_msg = dpi_bypass.start_dpi_bypass(mode=mode)
-                msg += f"\n{dpi_msg}"
-                if not dpi_ok:
-                    ok = False
+        # 2) DPI layer
+        engine_wanted = "Kanal 3" in self.active_channel
+        if engine_wanted:
+            mode = self.selected_profile or dpi_bypass.resolve_mode(self.isp_info)
+            engine_ok, engine_msg = dpi_bypass.start_dpi_bypass(mode=mode)
+            messages.append(engine_msg)
+            if not engine_ok:
+                self._ui(self._on_connect_done, False, "\n".join(messages),
+                           "Motor başlatılamadı")
+                return
 
-            label = f"{self.current_preset} DNS ({self.active_channel}) etkinleştirildi"
-            is_enabling = True
-        self.after(0, self._on_toggle_done, ok, msg, is_enabling, label)
+        # 3) Verify — the part that makes "connected" mean something
+        self._ui(self.log, "\n".join(messages))
+        self._ui(self.log, "🔍 Bağlantı doğrulanıyor…")
+        results = [strategy_finder.probe_host(host) for host in strategy_finder.DEFAULT_TARGETS]
+        blocked = [r for r in results if not r.ok]
 
-    def _on_toggle_done(self, ok, msg, is_enabling, label):
-        self.action_btn.configure(state="normal")
-        self.log(msg)
-        self.log(f"{'✓' if ok else '✗'}  {label}")
-        self.user_dns_enabled = is_enabling
-        if not is_enabling:
-            self.dns_active_start_time = None
+        for result in results:
+            self._ui(self.log,
+                       f"    {result.host}: {'✓ açık' if result.ok else '✗ ' + result.diagnosis}")
+
+        if not blocked:
+            self._ui(self._on_connect_done, True, "", "Bağlandı ve doğrulandı")
+            return
+
+        # 4) Still blocked → find a profile that measurably works
+        if engine_wanted:
+            self._ui(self.log,
+                       f"⚠ {len(blocked)} hedef hâlâ kapalı — çalışan strateji aranıyor…")
+            report = strategy_finder.find_best_strategy(
+                targets=tuple(r.host for r in blocked),
+                on_progress=lambda line: self._ui(self.log, line),
+            )
+            if report.best is not None:
+                applied_ok, applied_msg = strategy_finder.apply_report(report)
+                self.selected_profile = report.best.profile
+                self._ui(self.log, applied_msg)
+                if applied_ok:
+                    self._ui(self._on_connect_done, True, "",
+                               f"Bağlandı — {report.best.label} profili ile")
+                    return
+            verdict = diagnostics.classify_block(blocked[0].host)
+            self._ui(self.log, f"🔎 {verdict.get('message')}")
+            for item in verdict.get("evidence", []):
+                self._ui(self.log, f"    · {item}")
+            self._ui(self._on_connect_done, False, "",
+                       "Bağlanıldı ama engel aşılamadı")
+            return
+
+        self._ui(self._on_connect_done, True, "",
+                   f"Bağlandı ({len(blocked)} hedef hâlâ kapalı — Kanal 3'ü deneyin)")
+
+    def _on_connect_done(self, ok, message, label):
+        if message:
+            self.log(message)
+        self.log(f"{'✅' if ok else '⚠'}  {label}")
+        self.user_dns_enabled = True
+        self._set_connection_state("connected" if ok else "error")
         if self._guard:
-            self._guard.is_dns_active = self.user_dns_enabled
+            self._guard.is_dns_active = True
+        self.action_btn.configure(state="normal")
         self.refresh_status()
+
+    # ── disconnect ──────────────────────────────────────────────────────────────
+
+    def _do_disconnect(self):
+        """
+        Take protection down and *verify* the machine is back to normal — the
+        adapter on the user's own DNS servers, both engines stopped, nothing of
+        ours left listening.
+        """
+        self._set_connection_state("disconnecting")
+        self._ui(self.log, "⏳ Bağlantı kesiliyor…")
+
+        _, engine_msg = dpi_bypass.stop_dpi_bypass()
+        _, doh_msg = doh_proxy.stop()
+        dns_msg = self._restore_original_dns()
+
+        problems = []
+        if dpi_bypass.is_dpi_bypass_running():
+            problems.append("DPI motoru hâlâ çalışıyor")
+        if doh_proxy.is_running():
+            problems.append("DoH çözümleyici hâlâ çalışıyor")
+
+        state = dns_manager.get_current_dns(self.selected_adapter)
+        if state.get("is_local_doh"):
+            problems.append("DNS hâlâ 127.0.0.1'e bakıyor")
+
+        restored = ", ".join(state.get("ipv4") or []) or "Otomatik (DHCP)"
+        self._ui(self._on_disconnect_done, problems,
+                   f"{dns_msg}\n{engine_msg}\n{doh_msg}", restored)
+
+    def _on_disconnect_done(self, problems, message, restored):
+        self.log(message)
+        if problems:
+            self.log("⚠ Kapatma eksik kaldı: " + ", ".join(problems))
+            self._set_connection_state("error")
+        else:
+            self.log(f"🔌 Bağlantı kesildi. DNS geri yüklendi → {restored}")
+            self._set_connection_state("disconnected")
+        self.user_dns_enabled = False
+        self.dns_active_start_time = None
+        self._last_block_kind = None
+        if self._guard:
+            self._guard.is_dns_active = False
+        self.action_btn.configure(state="normal")
+        self.refresh_status()
+
+    # ── state machine ───────────────────────────────────────────────────────────
+
+    def _set_connection_state(self, state: str):
+        """Drive the button and the status text from one place, like a VPN client."""
+        self.connection_state = state
+        appearance = {
+            "disconnected":  ("⚡  BAĞLAN", BLURPLE, BLURPLE_DIM, "normal"),
+            "connecting":    ("⏳  BAĞLANILIYOR…", GOLD, GOLD, "disabled"),
+            "connected":     ("⏹  BAĞLANTIYI KES", RED, RED_DIM, "normal"),
+            "disconnecting": ("⏳  KAPATILIYOR…", GOLD, GOLD, "disabled"),
+            "error":         ("⏹  BAĞLANTIYI KES (sorun var)", RED, RED_DIM, "normal"),
+        }[state]
+        text, colour, hover, button_state = appearance
+
+        def apply():
+            self.action_btn.configure(text=text, fg_color=colour,
+                                      hover_color=hover, state=button_state)
+        self._ui(apply)
 
     # ═══════════════════════════════════════════════════════════════════════════════
     #  STATUS REFRESH
@@ -1280,7 +1501,7 @@ class DiscordDNSApp(ctk.CTk):
     def _do_refresh(self):
         dns  = dns_manager.get_current_dns(self.selected_adapter)
         disc = discord_checker.check_discord_connection()
-        self.after(0, self._apply_refresh, dns, disc)
+        self._ui(self._apply_refresh, dns, disc)
 
     def _apply_refresh(self, dns, disc):
         now = datetime.datetime.now().strftime("%H:%M:%S")
@@ -1471,7 +1692,7 @@ class DiscordDNSApp(ctk.CTk):
              "1. Yönetici İzni: Ağ kartı DNS adreslerini değiştirmek ve tünel sürücüsünü çalıştırmak için uygulamayı 'Yönetici Olarak Çalıştır'ın.\n"
              "2. En Hızlı DNS'i Bulun: '⚡ En Hızlı DNS'yi Bul' butonuna basarak bölgenizdeki en düşük gecikmeli DNS'i otomatik tespit edin.\n"
              "3. Heartbeat Guard: Sesli sohbet sırasında kesinti yaşamamak için arka plan bekçisini aktif tutun. Bağlantı düştüğünde ses görüşmeniz kopmadan yedek DNS'e geçer.\n"
-             "4. Manuel Kontrol: Uygulama ilk açıldığında internetinizi değiştirmez; siz 'ETKİNLEŞTİR' butonuna bastığınızda devreye girer."),
+             "4. Manuel Kontrol: Uygulama ilk açıldığında internetinizi değiştirmez; siz 'BAĞLAN' butonuna bastığınızda devreye girer. 'BAĞLANTIYI KES' dediğinizde DNS ayarlarınız kendi orijinal sunucularınıza geri döner ve motorlar kapanır — kapatma ayrıca doğrulanır."),
 
             ("🛡 Otomatik Güvenlik ve Temizlik",
              "Uygulamayı kapattığınızda veya sistem tepsisinden çıktığınızda Windows DNS ayarlarınız otomatik olarak orijinal varsayılanına (DHCP) döner. Arka planda çalışan tünel ve ağ sürücüsü güvenle temizlenir."),
@@ -1508,7 +1729,7 @@ class DiscordDNSApp(ctk.CTk):
 
     def manual_flush_dns(self):
         self.log("DNS önbelleği temizleniyor...")
-        threading.Thread(target=lambda: self.after(0, self.log, dns_manager.flush_dns_cache()), daemon=True).start()
+        threading.Thread(target=lambda: self._ui(self.log, dns_manager.flush_dns_cache()), daemon=True).start()
 
     def clear_logs(self):
         self.log_box.configure(state="normal")
@@ -1577,10 +1798,10 @@ class DiscordDNSApp(ctk.CTk):
             try:
                 verdict = diagnostics.classify_block("discord.com")
             except Exception as e:
-                self.after(0, self.log, f"Teşhis çalıştırılamadı: {e}")
-                self.after(0, setattr, self, "_last_block_kind", None)
+                self._ui(self.log, f"Teşhis çalıştırılamadı: {e}")
+                self._ui(setattr, self, "_last_block_kind", None)
                 return
-            self.after(0, self._show_block_verdict, verdict)
+            self._ui(self._show_block_verdict, verdict)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1629,12 +1850,12 @@ class DiscordDNSApp(ctk.CTk):
 
         def worker():
             def progress(message):
-                self.after(0, lambda: box.insert("end", f"  … {message}\n"))
+                self._ui(lambda: box.insert("end", f"  … {message}\n"))
             try:
                 report = diagnostics.collect_report(on_progress=progress)
             except Exception as e:
                 report = f"Tanılama başarısız: {e}"
-            self.after(0, lambda: (box.delete("1.0", "end"), box.insert("end", report)))
+            self._ui(lambda: (box.delete("1.0", "end"), box.insert("end", report)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1660,28 +1881,28 @@ class DiscordDNSApp(ctk.CTk):
 
     def _do_strategy_scan(self):
         def progress(message):
-            self.after(0, self.log, message)
+            self._ui(self.log, message)
 
         try:
             report = strategy_finder.find_best_strategy(on_progress=progress)
         except Exception as e:
-            self.after(0, self.log, f"✗ Strateji taraması başarısız: {e}")
+            self._ui(self.log, f"✗ Strateji taraması başarısız: {e}")
             return
 
-        self.after(0, self.log, f"🎯 {report.summary()}")
+        self._ui(self.log, f"🎯 {report.summary()}")
 
         if report.best is not None:
             ok, message = strategy_finder.apply_report(report)
-            self.after(0, self.log, message)
+            self._ui(self.log, message)
             if ok:
-                self.after(0, self.channel_seg.set, "⚡ Kanal 3: DPI Bypass")
+                self._ui(self.channel_seg.set, "⚡ Kanal 3: DPI Bypass")
                 self.active_channel = "Kanal 3: DPI Bypass"
         elif report.dns_hijack_suspected:
-            self.after(0, self.channel_seg.set, "🔒 Kanal 2: DoH Şifreli")
+            self._ui(self.channel_seg.set, "🔒 Kanal 2: DoH Şifreli")
             self.active_channel = "Kanal 2: DoH Şifreli"
-            self.after(0, self.log, "↪ Kanal 2 (şifreli DNS) seçildi — engel DNS katmanında.")
+            self._ui(self.log, "↪ Kanal 2 (şifreli DNS) seçildi — engel DNS katmanında.")
 
-        self.after(0, self.refresh_status)
+        self._ui(self.refresh_status)
 
     # ═══════════════════════════════════════════════════════════════════════════════
     #  SHUTDOWN & CRASH SAFETY

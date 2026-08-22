@@ -34,7 +34,7 @@ Uygulama; **TürkNet** kullanıcılarından **Superonline Fiber** ve **Türk Tel
 - ⚡ **Kanal 3: Superonline & Türk Telekom DPI Bypass**: **Uygulamanın kendi paket motoru** (WinDivert 2.2 sürücüsü üzerinde, harici `goodbyedpi.exe` süreci olmadan) TLS ClientHello paketini SNI alan adının ortasından böler, sahte paket enjekte eder ve segmentleri ters sırayla göndererek SNI engellerini aşar.
 
 ### ⏱ 3. Dijital Kronometre & Manuel Kontrol
-- Uygulama ilk açıldığında ağ kartınızı varsayılan (DHCP) konumda tutar; siz **`⚡ ETKİNLEŞTİR`** butonuna basmadan hiçbir işlem yapmaz.
+- Uygulama ilk açıldığında ağ kartınıza hiç dokunmaz; siz **`⚡ BAĞLAN`** butonuna basmadan hiçbir işlem yapmaz.
 - Kronometre sayacı sadece koruma butonla açıldığında saymaya başlar; kapatıldığında `00:00:00 PASİF — DNS KAPALI` moduna döner.
 
 ### 🛡 4. Otomatik Kapanış Restorasyonu (Safe Clean Shutdown)
@@ -147,6 +147,28 @@ python -m tests.test_dpi_live
 
 ---
 
+## 🔌 VPN Gibi Çalışır: Bağlan / Bağlantıyı Kes
+
+Tek buton, beş durum — ve her ikisi de **doğrulanır**:
+
+| Durum | Buton | Ne oluyor |
+|---|---|---|
+| `disconnected` | ⚡ **BAĞLAN** | Sisteme hiç dokunulmamış |
+| `connecting` | ⏳ BAĞLANILIYOR… | DNS uygulanıyor, motor açılıyor, **gerçek TLS bağlantısıyla sınanıyor** |
+| `connected` | ⏹ **BAĞLANTIYI KES** | Hedeflere erişim ölçülerek doğrulandı |
+| `disconnecting` | ⏳ KAPATILIYOR… | Motorlar durduruluyor, DNS geri yükleniyor |
+| `error` | ⏹ BAĞLANTIYI KES (sorun var) | Bağlandı ama engel aşılamadı — sebep loglandı |
+
+**BAĞLAN** yalnızca ayar uygulamaz; uyguladıktan sonra hedeflere **gerçek TLS bağlantısı** açar. Hâlâ engelliyse, çalışan bir profil bulunana kadar merdiveni kendisi tırmanır ve ancak ölçülen bir başarıdan sonra "bağlandı" der. Bulamazsa nedeni katman katman loglar.
+
+**BAĞLANTIYI KES** motorları durdurur, **kendi orijinal DNS sunucularınızı** geri yükler (DHCP'ye değil) ve sonra **doğrular**: motor gerçekten durdu mu, çözümleyici kapandı mı, ağ kartı hâlâ `127.0.0.1`'e mi bakıyor. Eksik kalan bir şey varsa açıkça söyler.
+
+**Otomatik toparlama:** Bağlıyken İSS davranışını değiştirirse (heartbeat üst üste başarısız olursa) uygulama kendi kendine çalışan yeni bir strateji arar ve ona geçer — siz hiçbir şey yapmadan.
+
+**DPI profili seçici:** VPN'lerdeki sunucu listesi gibi; `Otomatik (İSS'ye göre)` bırakabilir ya da dokuz profilden birini elle seçebilirsiniz.
+
+---
+
 ## 🩺 Bağlanamadığında Nedenini Söyler
 
 Uygulama "bağlanamadı" demekle yetinmez; engeli **katman katman** ölçüp mekanizmayı adıyla söyler:
@@ -224,7 +246,7 @@ Derlenmiş ve kuruluma ihtiyaç duymayan taşınabilir sürümü kullanmak için
 
 1. [Releases](../../releases) bölümünden veya `dist/Discord_DNS_v3.exe` dosyasını indirin.
 2. Dosyaya sağ tıklayıp **"Yönetici olarak çalıştır"** (Run as Administrator) deyin *(Ağ ayarlarını değiştirmek için Yönetici yetkisi gereklidir)*.
-3. Otomatik tespit edilen kanal ile **`⚡ DNS & KANAL ETKİNLEŞTİR`** butonuna basın.
+3. Otomatik tespit edilen kanal ile **`⚡ BAĞLAN`** butonuna basın.
 
 ---
 
