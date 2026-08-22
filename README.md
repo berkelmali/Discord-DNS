@@ -24,8 +24,9 @@ Uygulama; **TürkNet** kullanıcılarından **Superonline Fiber** ve **Türk Tel
 
 ## ✨ Öne Çıkan Özellikler
 
-### 🌐 1. Akıllı İSS Tespiti (Smart ISP Detector)
-- Uygulama başlatıldığında internet sağlayıcınızı (`TürkNet`, `Superonline`, `Türk Telekom`, `Vodafone`, `KabloNet` vb.) arka planda otomatik tespit eder.
+### 🌐 1. Akıllı İSS Tespiti & Otomatik Hazırlık
+- Uygulama başlatıldığında internet sağlayıcınızı (`TürkNet`, `Superonline`, `Türk Telekom / Avea`, `Vodafone`, `KabloNet` vb.) arka planda otomatik tespit eder.
+- Aynı anda altı DNS sağlayıcısını ölçer ve **en hızlısını kendiliğinden seçer** — siz açtığınızda bağlantı ekranı çoktan hazırdır (elle bir profil seçtiyseniz ona dokunmaz).
 - İSS'nizin engelleme türüne göre (DNS Yönlendirmesi / SNI Bloklama) en uygun kanalı otomatik tavsiye eder ve seçer.
 
 ### 🔀 2. Üç Farklı Bağlantı Kanalı (Multi-Channel Switching)
@@ -148,6 +149,8 @@ python -m tests.test_dpi_live
 ---
 
 ## 🔌 VPN Gibi Çalışır: Bağlan / Bağlantıyı Kes
+
+Arayüz de buna göre kurulmuştur: **bağlantı paneli ilk ekranda** — kanal seçimi, DPI profili, bağlantı durumu ve **BAĞLAN** butonu, hiç kaydırmadan görünür. Pencere sabit bir piksel boyutuyla değil, ekranınıza ve içeriğin gerçek genişliğine göre açılır; yüksek DPI ekranlarda içerik kesilmez.
 
 Tek buton, beş durum — ve her ikisi de **doğrulanır**:
 

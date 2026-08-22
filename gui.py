@@ -132,8 +132,12 @@ class DiscordDNSApp(ctk.CTk):
 
         # Window setup
         self.title("Discord DNS v3.6")
-        self.geometry("820x980")
-        self.minsize(780, 880)
+        # Real sizing happens in _fit_window() once the widgets exist and their
+        # true width is known. A fixed 820x980 assumed a big desktop at 100%
+        # scaling: on a high-DPI laptop the same numbers become ~1550x1860 after
+        # scaling, so the window ran off the screen and the right-hand column of
+        # every panel was cut off with no way to scroll to it.
+        self.geometry("900x900")
         self.configure(fg_color=BG)
 
         if os.path.exists(ICO_PATH):
@@ -148,6 +152,7 @@ class DiscordDNSApp(ctk.CTk):
         self.connection_state     = "disconnected"
         self.selected_profile     = None   # manual DPI profile override
         self._recovery_running    = False  # auto-recovery in flight
+        self._preset_user_chosen  = False  # user picked a DNS profile by hand
         self.is_admin_user        = admin_utils.is_admin()
         self.adapters             = dns_manager.get_network_adapters()
         self.selected_adapter     = self.adapters[0] if self.adapters else "Wi-Fi"
@@ -184,6 +189,10 @@ class DiscordDNSApp(ctk.CTk):
         self._start_adapter_autopilot()
         self._detect_isp_async()
         self._register_emergency_cleanup()
+        # Measure the providers up front so the connect screen is already set to
+        # the fastest one for this location. The user had to press a button for
+        # this before, which meant most people simply connected on the default.
+        self.after(1500, self._start_dns_benchmark)
 
         # X button → minimize to tray (not quit)
         self.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
@@ -206,19 +215,25 @@ class DiscordDNSApp(ctk.CTk):
         )
         root.grid(row=0, column=0, sticky="nsew")
         root.grid_columnconfigure(0, weight=1)
+        self._root_frame = root
 
         row = 0
+        # Order matters: this is a connect/disconnect app, so the control that
+        # connects has to be the first thing on screen. It used to sit below the
+        # stopwatch, the DNS benchmark and the recommendation banner, which meant
+        # scrolling past three panels to reach the button the app exists for.
         row = self._build_header(root, row)
-        row = self._build_dns_banner(root, row)
+        row = self._build_controls(root, row)
         row = self._build_status_cards(root, row)
         row = self._build_timer_card(root, row)
+        row = self._build_dns_banner(root, row)
         row = self._build_benchmark_panel(root, row)
-        row = self._build_controls(root, row)
         row = self._build_heartbeat_panel(root, row)
         row = self._build_voice_matrix(root, row)
         row = self._build_log_console(root, row)
 
         self._build_status_bar()
+        self._fit_window()
 
         # Initial log
         self.log("Discord DNS v3.6 başlatıldı.")
@@ -372,13 +387,19 @@ class DiscordDNSApp(ctk.CTk):
         self.isp_recom_lbl.configure(text=recom)
         self.log(f"🌐 İSS Algılandı: {isp_name} ({info.get('recommended_channel', 'Standart')})")
 
-        # Auto select recommended channel
+        # Auto select recommended channel. Setting a segmented button from code
+        # does not fire its command, so the description underneath has to be
+        # refreshed by hand — otherwise the app shows Kanal 2 selected while
+        # explaining what Kanal 1 does.
+        recommended = None
         if info.get("is_superonline") or info.get("is_ttnet"):
-            self.channel_seg.set("⚡ Kanal 3: DPI Bypass")
-            self.active_channel = "Kanal 3: DPI Bypass"
+            recommended = "⚡ Kanal 3: DPI Bypass"
         elif "DoH" in info.get("recommended_channel", ""):
-            self.channel_seg.set("🔒 Kanal 2: DoH Şifreli")
-            self.active_channel = "Kanal 2: DoH Şifreli"
+            recommended = "🔒 Kanal 2: DoH Şifreli"
+
+        if recommended:
+            self.channel_seg.set(recommended)
+            self.on_channel_change(recommended)
 
     # ── STATUS CARDS ───────────────────────────────────────────────────────────────
 
@@ -674,6 +695,30 @@ class DiscordDNSApp(ctk.CTk):
         self.profile_dropdown.set("Otomatik (İSS'ye göre)")
         self.profile_dropdown.grid(row=3, column=0, columnspan=2, sticky="ew",
                                    padx=4, pady=(4, 0))
+
+        # Connection status, stated plainly above the button that changes it
+        status_row = ctk.CTkFrame(frame, fg_color="transparent")
+        status_row.pack(fill="x", padx=20, pady=(12, 2))
+
+        self.conn_led = ctk.CTkLabel(
+            status_row, text="●",
+            font=ctk.CTkFont(size=18), text_color=TEXT_FAINT
+        )
+        self.conn_led.pack(side="left", padx=(2, 8))
+
+        self.conn_state_lbl = ctk.CTkLabel(
+            status_row, text="BAĞLI DEĞİL",
+            font=ctk.CTkFont(family="Segoe UI Variable", size=15, weight="bold"),
+            text_color=TEXT_MUTED
+        )
+        self.conn_state_lbl.pack(side="left")
+
+        self.conn_detail_lbl = ctk.CTkLabel(
+            status_row, text="Sistem ayarlarınıza dokunulmadı",
+            font=ctk.CTkFont(family="Segoe UI Variable", size=11),
+            text_color=TEXT_FAINT
+        )
+        self.conn_detail_lbl.pack(side="right", padx=4)
 
         # Big Action Button
         self.action_btn = ctk.CTkButton(
@@ -1158,9 +1203,15 @@ class DiscordDNSApp(ctk.CTk):
                 card.configure(fg_color=SURFACE, border_color=BORDER)
 
         if fastest_name:
+            if self._preset_user_chosen and self.current_preset != fastest_name:
+                # Never overrule a deliberate choice; just say what was measured
+                self.log(f"⚡ En hızlı DNS: {fastest_name} ({results[fastest_name]['ms']} ms) — "
+                         f"sizin seçiminiz ({self.current_preset}) korunuyor.")
+                return
             self.current_preset = fastest_name
             self.preset_dropdown.set(fastest_name)
-            self.log(f"⚡ EN HIZLI DNS TESPİT EDİLDİ: {fastest_name} ({results[fastest_name]['ms']} ms)")
+            self.log(f"⚡ En hızlı DNS otomatik seçildi: {fastest_name} "
+                     f"({results[fastest_name]['ms']} ms) — bağlanmaya hazır.")
             self._sync_action_button()
 
     def _start_adapter_autopilot(self):
@@ -1200,6 +1251,7 @@ class DiscordDNSApp(ctk.CTk):
 
     def on_preset_change(self, choice):
         self.current_preset = choice
+        self._preset_user_chosen = True
         if self._guard:
             self._guard.sync_preset(self.current_preset)
         self.log(f"Profil: {self.current_preset}")
@@ -1213,6 +1265,16 @@ class DiscordDNSApp(ctk.CTk):
             self.chan_desc_lbl.configure(text="🔒 Kanal 2: Yerel DoH çözümleyici -- tüm DNS sorguları 443/TLS üzerinden şifrelenir (Windows 10/11).")
         elif "Kanal 3" in choice:
             self.chan_desc_lbl.configure(text="⚡ Kanal 3: Yerel DPI motoru -- ClientHello'yu SNI içinden bölerek Superonline/TT engellerini aşar.")
+        # Channels 2 and 3 both route DNS through the local encrypted resolver,
+        # so the checkbox is not a separate choice there — showing it unticked
+        # while encrypted DNS is actually in use was simply misleading.
+        implied = ("Kanal 2" in choice) or ("Kanal 3" in choice)
+        self.doh_enabled_var.set(True if implied else False)
+        try:
+            self.doh_chk.configure(state="disabled" if implied else "normal")
+        except Exception:
+            pass
+
         self.log(f"Kanal Değişti: {choice}")
         self._sync_action_button()
 
@@ -1271,6 +1333,51 @@ class DiscordDNSApp(ctk.CTk):
                 if self.connection_state == "connected":
                     self.log("↪ Değişikliğin geçerli olması için bağlantıyı kesip yeniden bağlanın.")
                 return
+
+    def _display_scaling(self) -> float:
+        """
+        The factor CustomTkinter applies to every widget on this display.
+
+        Everything that computes a size has to agree on it, so it is read in one
+        place. Reading it separately in the dialog code silently fell back to 1.0
+        and produced a window taller than the screen.
+        """
+        try:
+            scaling = ctk.ScalingTracker.get_window_scaling(self)
+        except Exception:
+            scaling = None
+        return float(scaling) if scaling else 1.0
+
+    def _fit_window(self):
+        """
+        Size and centre the window against the actual screen and the actual
+        content, in the same units the widgets use.
+
+        CustomTkinter scales every widget by the display's DPI factor, so a
+        hard-coded pixel size means something different on each machine. Asking
+        the built layout how wide it wants to be, then clamping that to the
+        screen, gives a window that fits everywhere: nothing is cut off on a
+        laptop, and nothing is needlessly cramped on a desktop.
+        """
+        self.update_idletasks()
+        scaling = self._display_scaling()
+
+        screen_w = self.winfo_screenwidth() / scaling
+        screen_h = self.winfo_screenheight() / scaling
+
+        try:
+            # +40 leaves room for the scrollbar and the frame's own padding
+            wanted_w = self._root_frame.winfo_reqwidth() / scaling + 40
+        except Exception:
+            wanted_w = 900
+
+        width = int(max(780, min(wanted_w, screen_w * 0.95)))
+        height = int(min(980, screen_h * 0.88))
+        x = int(max(0, (screen_w - width) / 2))
+        y = int(max(0, (screen_h - height) / 2 - 20))
+
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.minsize(int(min(760, screen_w * 0.9)), int(min(620, screen_h * 0.5)))
 
     def _ui(self, callback, *args):
         """
@@ -1484,9 +1591,26 @@ class DiscordDNSApp(ctk.CTk):
         }[state]
         text, colour, hover, button_state = appearance
 
+        banner = {
+            "disconnected":  ("BAĞLI DEĞİL", TEXT_MUTED, TEXT_FAINT,
+                              "Sistem ayarlarınıza dokunulmadı"),
+            "connecting":    ("BAĞLANILIYOR…", GOLD, GOLD,
+                              "Ayarlar uygulanıyor ve doğrulanıyor"),
+            "connected":     ("BAĞLI", GREEN, GREEN,
+                              "Erişim gerçek bağlantıyla doğrulandı"),
+            "disconnecting": ("KAPATILIYOR…", GOLD, GOLD,
+                              "Motorlar durduruluyor, DNS geri yükleniyor"),
+            "error":         ("BAĞLI — ENGEL AŞILAMADI", RED, RED,
+                              "Ayrıntı için günlüğe bakın"),
+        }[state]
+        label, label_colour, led_colour, detail = banner
+
         def apply():
             self.action_btn.configure(text=text, fg_color=colour,
                                       hover_color=hover, state=button_state)
+            self.conn_state_lbl.configure(text=label, text_color=label_colour)
+            self.conn_led.configure(text_color=led_colour)
+            self.conn_detail_lbl.configure(text=detail)
         self._ui(apply)
 
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -1651,7 +1775,12 @@ class DiscordDNSApp(ctk.CTk):
         """Open a detailed, dark-themed information & user guide window."""
         dialog = ctk.CTkToplevel(self)
         dialog.title("ℹ Discord DNS v3.6 — Bilgi & Kullanım Rehberi")
-        dialog.geometry("660x650")
+        # Clamp to the screen in the same units the widgets use, so the guide
+        # does not open taller than the desktop on a scaled display.
+        scaling = self._display_scaling()
+        dlg_w = 720
+        dlg_h = int(min(700, (self.winfo_screenheight() / scaling) * 0.82))
+        dialog.geometry(f"{dlg_w}x{dlg_h}")
         dialog.configure(fg_color="#0F111A")
         dialog.transient(self)
         dialog.grab_set()
@@ -1659,9 +1788,9 @@ class DiscordDNSApp(ctk.CTk):
         # Center dialog relative to main window
         try:
             dialog.update_idletasks()
-            x = self.winfo_x() + (self.winfo_width() // 2) - (660 // 2)
-            y = self.winfo_y() + (self.winfo_height() // 2) - (650 // 2)
-            dialog.geometry(f"660x650+{max(0, x)}+{max(0, y)}")
+            x = self.winfo_x() + (self.winfo_width() // 2) - (dlg_w // 2)
+            y = self.winfo_y() + (self.winfo_height() // 2) - (dlg_h // 2)
+            dialog.geometry(f"{dlg_w}x{dlg_h}+{max(0, x)}+{max(0, y)}")
         except Exception:
             pass
 
@@ -1680,26 +1809,67 @@ class DiscordDNSApp(ctk.CTk):
         body.pack(fill="both", expand=True, padx=16, pady=8)
 
         text_sections = [
-            ("📌 Uygulama Ne İşe Yarar?",
-             "Discord DNS v3.6; Türkiye'deki internet servis sağlayıcılarının (İSS) Discord ve benzeri platformlara uyguladığı DNS Yönlendirmesi (DNS Hijacking), SNI Engellemesi ve Derin Paket İnceleme (DPI) kısıtlamalarını tek tıkla aşmanızı sağlayan akıllı bir tünelleme ve şifreli DNS yazılımıdır."),
+            ("⚡ 3 Adımda Başla",
+             "1. Uygulamayı Yönetici olarak açın (başlıkta sarı 'Yönetici Yap' düğmesi görünüyorsa henüz değilsiniz).\n"
+             "2. Kanal, İSS'nize göre zaten otomatik seçilidir — dokunmanıza gerek yok.\n"
+             "3. ⚡ BAĞLAN'a basın. Uygulama ayarları uygular, sonra gerçek bir bağlantı kurup çalıştığını doğrular "
+             "ve ancak o zaman 'BAĞLI' yazar.\n\n"
+             "Hepsi bu. İşiniz bitince ⏹ BAĞLANTIYI KES deyin; DNS ayarlarınız kendi orijinal sunucularınıza geri döner."),
 
-            ("🔀 Hangi Kanalı Seçmeliyim? (Kim Nasıl Kullanmalı?)",
-             "• 🟢 Kanal 1: Standart DNS (TürkNet & Engelsiz İSS'ler):\n  İSS'nizde ağır paket engellemesi yoksa Cloudflare (1.1.1.1) veya AdGuard ile en düşük ping değerini (10-15 ms) sunar.\n\n"
-             "• 🔒 Kanal 2: DoH (DNS-over-HTTPS) Şifreli Mod:\n  İSS'niz varsayılan DNS sorgularınızı müdahale ile kendi sunucularına yönlendiriyorsa, sorguları 443/TLS portu üzerinden tam şifreleyerek engelleri aşar.\n\n"
-             "• ⚡ Kanal 3: DPI Bypass (Superonline & Türk Telekom Özel):\n  Uygulamanın kendi WinDivert paket motoru; TLS ClientHello'yu SNI alan adının ortasından bölerek, sahte paket enjekte ederek ve segmentleri ters sırayla göndererek Superonline ve Türk Telekom SNI engellerini aşar. Harici goodbyedpi.exe gerekmez."),
+            ("🔌 'BAĞLAN' ve 'BAĞLANTIYI KES' tam olarak ne yapar?",
+             "BAĞLAN yalnızca ayar uygulamaz — uyguladıktan sonra Discord sunucularına gerçek bir şifreli bağlantı açıp sınar. "
+             "Hâlâ engelliyse çalışan bir yöntem bulana kadar stratejileri tek tek dener ve ancak ölçtüğü bir başarıdan sonra "
+             "'BAĞLI' der. Bulamazsa nedenini günlüğe yazar, butonu 'ENGEL AŞILAMADI' durumunda bırakır; size asla sahte bir "
+             "'bağlandı' göstermez.\n\n"
+             "BAĞLANTIYI KES motorları durdurur, DNS'inizi geri yükler ve sonra kontrol eder: motor gerçekten durdu mu, "
+             "şifreli çözümleyici kapandı mı, ağ kartı hâlâ uygulamaya mı bakıyor. Eksik kalan olursa size söyler."),
 
-            ("🚀 Nasıl Daha Verimli Kullanılır?",
-             "1. Yönetici İzni: Ağ kartı DNS adreslerini değiştirmek ve tünel sürücüsünü çalıştırmak için uygulamayı 'Yönetici Olarak Çalıştır'ın.\n"
-             "2. En Hızlı DNS'i Bulun: '⚡ En Hızlı DNS'yi Bul' butonuna basarak bölgenizdeki en düşük gecikmeli DNS'i otomatik tespit edin.\n"
-             "3. Heartbeat Guard: Sesli sohbet sırasında kesinti yaşamamak için arka plan bekçisini aktif tutun. Bağlantı düştüğünde ses görüşmeniz kopmadan yedek DNS'e geçer.\n"
-             "4. Manuel Kontrol: Uygulama ilk açıldığında internetinizi değiştirmez; siz 'BAĞLAN' butonuna bastığınızda devreye girer. 'BAĞLANTIYI KES' dediğinizde DNS ayarlarınız kendi orijinal sunucularınıza geri döner ve motorlar kapanır — kapatma ayrıca doğrulanır."),
+            ("🔀 Hangi kanal? (emin değilseniz otomatik seçime güvenin)",
+             "🟢 Kanal 1 — Standart DNS\n"
+             "    İSS'niz engelleme yapmıyorsa en hızlısı. Yalnızca DNS sunucunuzu değiştirir.\n\n"
+             "🔒 Kanal 2 — Şifreli DNS (DoH)\n"
+             "    İSS'niz DNS yanıtlarını değiştiriyorsa (discord.com'u engel sunucusuna yönlendiriyorsa) bunu çözer. "
+             "Uygulama kendi çözümleyicisini bilgisayarınızda çalıştırır; tüm sorgular 443/TLS üzerinden şifreli gider.\n\n"
+             "⚡ Kanal 3 — DPI Bypass\n"
+             "    İSS'niz bağlantının içindeki alan adını görüp bağlantıyı kesiyorsa gereken budur. Uygulamanın kendi paket "
+             "motoru devreye girer, şifreli DNS de birlikte açılır. Türk Telekom / Avea ve Superonline için önerilen kanal budur."),
 
-            ("🛡 Otomatik Güvenlik ve Temizlik",
-             "Uygulamayı kapattığınızda veya sistem tepsisinden çıktığınızda Windows DNS ayarlarınız otomatik olarak orijinal varsayılanına (DHCP) döner. Arka planda çalışan tünel ve ağ sürücüsü güvenle temizlenir."),
+            ("🎯 Çalışmadıysa: uygulama size nedenini söyler",
+             "Bağlantı kurulamadığında günlükte '🔎 Erişim sorunu teşhisi:' satırını arayın:\n\n"
+             "• 'SNI ENGELİ ... RST paketiyle kesiyor'  →  Kanal 3'e geçin, sonra 🎯 Strateji Bul'a basın.\n"
+             "• 'DNS KAÇIRMA ... engel sunucusuna'  →  Kanal 2 yeterlidir.\n"
+             "• 'TCP bağlantısı hiç kurulamıyor'  →  IP seviyesinde engel; bu araç aşamaz, VPN gerekir.\n"
+             "• 'Şifreli DNS sunucularına ulaşılamıyor'  →  İnternet bağlantınızı kontrol edin.\n\n"
+             "🔬 Test & Kanıtla düğmesi tüm kontrolleri tek seferde yapıp paylaşılabilir bir rapor üretir; genel IP'niz "
+             "maskelenir. Sorun bildirirken bu raporu ekleyin."),
+
+            ("🧠 Gelişmiş kullanım",
+             "• 🎯 Strateji Bul: Profilleri en hafiften en agresife doğru dener ve hattınızda gerçekten çalışanı ölçerek "
+             "seçer. Bir şey çalışmıyorsa ilk başvuracağınız düğme budur.\n\n"
+             "• DPI Profili menüsü: 'Otomatik' bırakabilir ya da elle seçebilirsiniz. Türk Telekom / Avea hattında ölçümle "
+             "doğrulanan yöntem 'Durum Takipli DPI' profilidir.\n\n"
+             "• Yalnızca Discord'a dokunsun: %APPDATA%\\DiscordDNS\\blacklist.txt dosyasına satır satır alan adı yazarsanız "
+             "motor sadece onlara dokunur, diğer trafiğinize hiç karışmaz.\n\n"
+             "• Otomatik toparlama: Bağlıyken İSS davranışını değiştirirse uygulama kendi kendine çalışan yeni bir strateji "
+             "arar ve ona geçer; sizin bir şey yapmanız gerekmez."),
+
+            ("🔔 Pencereyi kapatmak uygulamayı kapatmaz",
+             "X düğmesi uygulamayı sistem tepsisine küçültür, koruma çalışmaya devam eder. Tamamen çıkmak için tepsi "
+             "simgesine sağ tıklayıp Çıkış'ı seçin.\n\n"
+             "Windows 11 yeni tepsi simgelerini gizli alana (görev çubuğundaki ^ oku) koyar. Simgeyi oradan sürükleyip görev "
+             "çubuğuna bırakırsanız kalıcı görünür olur. Simgenin üzerine geldiğinizde koruma durumu yazar."),
+
+            ("🛡 Ayarlarınıza ne oluyor?",
+             "Uygulama açılışta hiçbir şeye dokunmaz. BAĞLAN dediğinizde mevcut DNS ayarlarınız yedeklenir; BAĞLANTIYI KES "
+             "veya çıkış yaptığınızda tam olarak o ayarlara dönülür — DHCP'ye değil, kendi sunucularınıza.\n\n"
+             "Uygulama zorla kapatılırsa diye iki güvenlik ağı vardır: ikincil DNS olarak Cloudflare yazılır, böylece "
+             "internetiniz kesilmez; ve uygulama bir sonraki açılışında yedekten geri yükler. Ağ sürücüsü, son bağlantı "
+             "kapandığında Windows tarafından kaldırılır."),
 
             ("📜 Lisans & Telif Bilgisi",
              "Geliştirici: Berk Elmalı (https://github.com/berkelmali/Discord-DNS)\n"
-             "Bu proje açık kaynak kodludur. Kodları kullanan veya yeniden dağıtan herkes geliştirici atıf şartını korumakla yükümlüdür.")
+             "Bu proje açık kaynak kodludur. Kodları kullanan veya yeniden dağıtan herkes geliştirici atıf şartını "
+             "korumakla yükümlüdür.")
         ]
 
         for title, desc in text_sections:
@@ -1715,7 +1885,7 @@ class DiscordDNSApp(ctk.CTk):
             ctk.CTkLabel(
                 sec_frame, text=desc,
                 font=ctk.CTkFont(family="Segoe UI Variable", size=11),
-                text_color="#DCDDDE", justify="left", wraplength=570
+                text_color="#DCDDDE", justify="left", wraplength=545
             ).pack(anchor="w", padx=14, pady=(0, 10))
 
         # Close Button
