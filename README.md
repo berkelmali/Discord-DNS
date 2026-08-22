@@ -34,7 +34,7 @@ Uygulama; **TürkNet** kullanıcılarından **Superonline Fiber** ve **Türk Tel
 - ⚡ **Kanal 3: Superonline & Türk Telekom DPI Bypass**: **Uygulamanın kendi paket motoru** (WinDivert 2.2 sürücüsü üzerinde, harici `goodbyedpi.exe` süreci olmadan) TLS ClientHello paketini SNI alan adının ortasından böler, sahte paket enjekte eder ve segmentleri ters sırayla göndererek SNI engellerini aşar.
 
 ### ⏱ 3. Dijital Kronometre & Manuel Kontrol
-- Uygulama ilk açıldığında ağ kartınızı varsayılan (DHCP) konumda tutar; siz **`⚡ ETKİNLEŞTİR`** butonuna basmadan hiçbir işlem yapmaz.
+- Uygulama ilk açıldığında ağ kartınıza hiç dokunmaz; siz **`⚡ BAĞLAN`** butonuna basmadan hiçbir işlem yapmaz.
 - Kronometre sayacı sadece koruma butonla açıldığında saymaya başlar; kapatıldığında `00:00:00 PASİF — DNS KAPALI` moduna döner.
 
 ### 🛡 4. Otomatik Kapanış Restorasyonu (Safe Clean Shutdown)
@@ -75,7 +75,46 @@ Motor, WinDivert filtresi sayesinde çekirdekten yalnızca **ilgili paketleri** 
 3. **Ters sıralı gönderim** — segmentler son parçadan başlayarak gönderilir; yalnızca ilk segmente bakan DPI motorları akışı hiç eşleştiremez.
 4. **QUIC kapatma (opsiyonel)** — UDP/443 düşürülerek tarayıcılar TCP+TLS'e döner, böylece yukarıdaki adımlar bu trafiğe de uygulanır.
 
-İSS profillerine göre hazır stratejiler `dpi_engine.PRESETS` içinde tanımlıdır: `superonline`, `ttnet`, `vodafone`, `general` ve yalnızca Discord alan adlarına dokunan `discord_only`.
+İSS profillerine göre hazır stratejiler `dpi_engine.PRESETS` içinde tanımlıdır ve strateji bulucu bunları en hafiften en agresife doğru dener:
+
+`vodafone` → `general` → `ttnet` → `superonline` → `hardened` → `maximum` → `stateful` → `stateful_fake_only` → `native_frag`
+
+**Sahada doğrulandı (Türk Telekom / Avea mobil hattı):**
+
+```
+Motor kapalıyken:  discord.com FAIL — SNI engeli, İSS bağlantıyı RST ile kesti
+                   gateway.discord.gg FAIL — aynı
+
+→ Durum Takipli DPI profili:  2/2 hedef açıldı, ortanca 188 ms
+                              (2 paket yeniden yazıldı, 0 RST engellendi)
+```
+
+`0 RST engellendi` satırı burada en önemli veri: DPI kutusu reset **göndermedi bile**. Yani bağlantı "reset'e rağmen ayakta kalmadı" — engel hiç tetiklenmedi. Aynı hatta yalnızca parçalamaya dayanan yedi profilin tamamı başarısız oldu, çünkü o kutu TCP akışını yeniden birleştiriyor.
+
+**Durum takipli DPI için özel profiller:** Türk Telekom mobil (Avea) hattında yapılan ölçüm, oradaki DPI kutusunun TCP akışını **yeniden birleştirdiğini** gösterdi — parçalama tek başına yetmiyor. Bu kutulara karşı sahte paketin *doğru sıra numarasında* olması ve sunucuya varmadan **TTL ile ölmesi** gerekir (pencere dışı `badseq` sahte paketini durum takibi yapan DPI zaten yok sayar). `stateful` ve `stateful_fake_only` profilleri tam olarak bunu yapar; sunucu mesafesi henüz öğrenilmemişse sahte paket **hiç gönderilmez**, çünkü yanlış TTL gerçek el sıkışmasını bozardı.
+
+Ayrıca yalnızca Discord alan adlarına dokunan `discord_only` profili vardır.
+
+### GoodbyeDPI ile karşılaştırma
+
+Motor, GoodbyeDPI'nin HTTPS/SNI tekniklerinin tamamını kendi kodumuzla uygular; kapsamı dürüstçe belirtmek gerekirse:
+
+| GoodbyeDPI özelliği | Bu uygulamada |
+|---|---|
+| `-e` / `-f` ClientHello parçalama | ✅ SNI **içinden** bölme (sabit ofsetten güçlü) |
+| `--reverse-frag` ters sıra | ✅ |
+| `--wrong-seq` pencere dışı sahte paket | ✅ varsayılan |
+| `--wrong-chksum` bozuk sağlamalı sahte paket | ✅ (badseq ile birlikte) |
+| `--auto-ttl` otomatik TTL | ✅ gelen SYN-ACK'ten mesafe öğrenilir |
+| `--native-frag` IP katmanında parçalama | ✅ `native_frag` profili |
+| `-p` pasif DPI engelleme (sahte RST) | ✅ tüm profillerde varsayılan; art arda gelen RST'lerin **hepsini** düşürür (TTL ayrımı opsiyonel — ölçümde DPI'ın TTL taklit ettiği görüldü) |
+| `-r` `Host:` → `hOsT:` | ✅ |
+| `-m` Host değerinde harf karıştırma | ✅ |
+| `-s` + `-a` boşluk taşıma | ✅ **çift olarak** (uzunluk korunur, TCP akışı bozulmaz) |
+| `--blacklist` alan adı listesi | ✅ `%APPDATA%\DiscordDNS\blacklist.txt` |
+| `--dns-addr` DNS yönlendirme | ✅ yerine şifreli yerel DoH çözümleyici |
+| `-k` HTTP isteğini N parçaya bölme | ➖ TLS bölme mevcut, HTTP için ayrı parçalama yok |
+| Windows servisi olarak kurulum | ➖ uygulama açıkken çalışır |
 
 ### Performans
 
@@ -83,7 +122,7 @@ Motor, çekirdek filtresi sayesinde yalnızca ClientHello ve HTTP isteklerini ku
 
 | Ölçüm | Sonuç |
 |---|---|
-| ClientHello başına işlem maliyeti | **16.5 mikrosaniye** (~60.000 yeni bağlantı/sn kapasite) |
+| ClientHello başına işlem maliyeti | **~150-200 mikrosaniye** (sahte paket üretimi ve sağlama hesabı dahil, gerçek kod yolunda ölçüldü) |
 | Toplu veri trafiğine etkisi | **yok** — çekirdek hızlı yolunda kalır |
 | DNS: modem (şifresiz) | ~17 ms |
 | DNS: yerel DoH (şifreli) | ~15 ms |
@@ -105,6 +144,66 @@ python -m tests.test_dpi_live
 ```
 
 `test_dpi_live`, motoru açıp gerçek TLS bağlantıları kurar, kaç paketin yeniden yazıldığını raporlar, sonra motoru kapatıp arkada bir şey kalmadığını doğrular.
+
+---
+
+## 🔌 VPN Gibi Çalışır: Bağlan / Bağlantıyı Kes
+
+Tek buton, beş durum — ve her ikisi de **doğrulanır**:
+
+| Durum | Buton | Ne oluyor |
+|---|---|---|
+| `disconnected` | ⚡ **BAĞLAN** | Sisteme hiç dokunulmamış |
+| `connecting` | ⏳ BAĞLANILIYOR… | DNS uygulanıyor, motor açılıyor, **gerçek TLS bağlantısıyla sınanıyor** |
+| `connected` | ⏹ **BAĞLANTIYI KES** | Hedeflere erişim ölçülerek doğrulandı |
+| `disconnecting` | ⏳ KAPATILIYOR… | Motorlar durduruluyor, DNS geri yükleniyor |
+| `error` | ⏹ BAĞLANTIYI KES (sorun var) | Bağlandı ama engel aşılamadı — sebep loglandı |
+
+**BAĞLAN** yalnızca ayar uygulamaz; uyguladıktan sonra hedeflere **gerçek TLS bağlantısı** açar. Hâlâ engelliyse, çalışan bir profil bulunana kadar merdiveni kendisi tırmanır ve ancak ölçülen bir başarıdan sonra "bağlandı" der. Bulamazsa nedeni katman katman loglar.
+
+**BAĞLANTIYI KES** motorları durdurur, **kendi orijinal DNS sunucularınızı** geri yükler (DHCP'ye değil) ve sonra **doğrular**: motor gerçekten durdu mu, çözümleyici kapandı mı, ağ kartı hâlâ `127.0.0.1`'e mi bakıyor. Eksik kalan bir şey varsa açıkça söyler.
+
+**Otomatik toparlama:** Bağlıyken İSS davranışını değiştirirse (heartbeat üst üste başarısız olursa) uygulama kendi kendine çalışan yeni bir strateji arar ve ona geçer — siz hiçbir şey yapmadan.
+
+**DPI profili seçici:** VPN'lerdeki sunucu listesi gibi; `Otomatik (İSS'ye göre)` bırakabilir ya da dokuz profilden birini elle seçebilirsiniz.
+
+---
+
+## 🩺 Bağlanamadığında Nedenini Söyler
+
+Uygulama "bağlanamadı" demekle yetinmez; engeli **katman katman** ölçüp mekanizmayı adıyla söyler:
+
+| Teşhis | Anlamı | Çözümü |
+|---|---|---|
+| `dns_hijack` | İSS DNS yanıtını engel sunucusuna çeviriyor | Kanal 2 (şifreli DNS) |
+| `sni_rst` | TCP kuruluyor, alan adı görülünce sahte RST geliyor | Kanal 3 (DPI motoru) |
+| `sni_timeout` | Alan adı görülünce paketler sessizce yutuluyor | Kanal 3 |
+| `tcp_blocked` | Sunucuya TCP hiç kurulamıyor (IP/port engeli) | DPI motoru çözemez |
+| `mitm` | Sahte sertifika sunuluyor | Kanal 2 |
+
+Örnek log çıktısı:
+
+```
+🔎 Erişim sorunu teşhisi: SNI ENGELİ: TCP bağlantısı kuruluyor, ancak İSS alan
+   adını (discord.com) görür görmez bağlantıyı sahte bir RST paketiyle kesiyor.
+    · Sistem DNS'i (172.20.10.1) → 195.175.254.2, gerçek adres → 162.159.128.233
+    · TCP 162.159.128.233:443 → açık
+    · ClientHello gönderildikten hemen sonra RST geldi
+↪ Öneri: Kanal 3 (DPI Bypass) veya 🎯 Strateji Bul.
+```
+
+Farklı IP + geçerli sertifika durumunu **CDN farkı** olarak ayırt eder, boş yere "kaçırma" demez.
+
+### Kendi alan adı listeniz
+
+`%APPDATA%\DiscordDNS\blacklist.txt` dosyası oluşturursanız motor **yalnızca** oradaki alan adlarına dokunur, geri kalan tüm trafiğinize hiç karışmaz:
+
+```text
+# satır başına bir alan adı, # ile yorum
+discord.com
+discord.gg
+discordapp.net
+```
 
 ---
 
@@ -147,7 +246,7 @@ Derlenmiş ve kuruluma ihtiyaç duymayan taşınabilir sürümü kullanmak için
 
 1. [Releases](../../releases) bölümünden veya `dist/Discord_DNS_v3.exe` dosyasını indirin.
 2. Dosyaya sağ tıklayıp **"Yönetici olarak çalıştır"** (Run as Administrator) deyin *(Ağ ayarlarını değiştirmek için Yönetici yetkisi gereklidir)*.
-3. Otomatik tespit edilen kanal ile **`⚡ DNS & KANAL ETKİNLEŞTİR`** butonuna basın.
+3. Otomatik tespit edilen kanal ile **`⚡ BAĞLAN`** butonuna basın.
 
 ---
 

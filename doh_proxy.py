@@ -537,6 +537,47 @@ def stop() -> Tuple[bool, str]:
     return get_proxy().stop() if _proxy is not None else (True, "DoH çözümleyici kapalı.")
 
 
+def build_query(name: str, qtype: int = 1) -> bytes:
+    """Assemble a minimal DNS query message for one name."""
+    labels = b"".join(bytes([len(p)]) + p.encode("idna" if not p.isascii() else "ascii")
+                      for p in name.rstrip(".").split("."))
+    return (struct.pack("!HHHHHH", 0, 0x0100, 1, 0, 0, 0)
+            + labels + b"\x00" + struct.pack("!HH", qtype, 1))
+
+
+def parse_a_records(message: bytes) -> List[str]:
+    """Pull the A records out of a response, skipping CNAMEs and other types."""
+    try:
+        pos = _skip_name(message, 12) + 4
+        found: List[str] = []
+        for _ in range(struct.unpack_from("!H", message, 6)[0]):
+            pos = _skip_name(message, pos)
+            if pos + 10 > len(message):
+                break
+            rtype = struct.unpack_from("!H", message, pos)[0]
+            rdlen = struct.unpack_from("!H", message, pos + 8)[0]
+            if rtype == 1 and rdlen == 4:
+                found.append(socket.inet_ntoa(message[pos + 10:pos + 14]))
+            pos += 10 + rdlen
+        return found
+    except Exception:
+        return []
+
+
+def resolve_a(name: str, timeout: float = 6.0) -> List[str]:
+    """
+    Resolve a name over HTTPS without needing the local listener to be running.
+
+    This is what lets diagnostics and the strategy finder test the DPI layer on its
+    own: on a line whose ISP hijacks DNS, resolving through the system resolver
+    would send every probe to the block server and every profile would look
+    broken, no matter how well the engine works.
+    """
+    proxy = get_proxy()
+    answer = proxy._query_upstreams(build_query(name))
+    return parse_a_records(answer) if answer else []
+
+
 def rotate_upstream() -> Tuple[bool, str]:
     """
     Move to the next DoH provider. Used by the heartbeat guard instead of

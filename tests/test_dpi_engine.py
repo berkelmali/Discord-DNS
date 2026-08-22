@@ -277,9 +277,50 @@ def test_auto_ttl_and_rst():
     import windivert as wd_mod
     addr = wd_mod.WinDivertAddress()
 
+    engine._hops.clear()          # distance unknown → fall back to the flow window
     rec = Recorder()
     engine._handle_inbound(rec, inbound_rst(pkt.dst_ip, pkt.dst_port, pkt.src_port), addr)
-    check("DPI kaynaklı RST düşürülür", rec.forwarded == 0 and engine.stats.rst_blocked == 1)
+    check("mesafe bilinmezken RST düşürülür", rec.forwarded == 0 and engine.stats.rst_blocked == 1)
+
+    # Distance known: a reset from a middlebox arrives from noticeably closer
+    # than the server, while the server's own reset matches its hop count.
+    engine._remember_flow(pkt)
+    engine._hops[pkt.dst_ip] = 14              # server is 14 hops away
+    rec = Recorder()
+    engine._handle_inbound(rec, inbound_rst(pkt.dst_ip, pkt.dst_port, pkt.src_port), addr)
+    check("DPI kutusundan gelen (daha yakın) RST düşürülür",
+          rec.forwarded == 0 and engine.stats.rst_blocked == 2)
+
+    # Default: the TTL comparison is OFF. Measured on a TT mobile line, the
+    # injected resets arrived with a TTL matching the server's distance, so the
+    # check waved every one of them through and the strongest profiles blocked
+    # nothing at all. Inside the window, a reset on a rewritten flow is hostile.
+    engine._remember_flow(pkt)
+    engine._hops[pkt.dst_ip] = 7               # matches the probe's TTL 57 → 7 hops
+    rec = Recorder()
+    engine._handle_inbound(rec, inbound_rst(pkt.dst_ip, pkt.dst_port, pkt.src_port), addr)
+    check("varsayılan: mesafe uyuşsa bile RST düşürülür (TTL taklidine karşı)",
+          rec.forwarded == 0 and engine.stats.rst_blocked == 3)
+
+    # A DPI box firing several resets in a row must be blocked every time — the
+    # flow entry deliberately survives the first block.
+    rec = Recorder()
+    engine._handle_inbound(rec, inbound_rst(pkt.dst_ip, pkt.dst_port, pkt.src_port), addr)
+    check("art arda gelen ikinci RST de düşürülür",
+          rec.forwarded == 0 and engine.stats.rst_blocked == 4)
+
+    # Opt-in: networks where the check does help can still enable it
+    engine.config = dpi_engine.DpiConfig(**{**dpi_engine.PRESETS["hardened"].__dict__,
+                                            "rst_ttl_check": True})
+    engine._remember_flow(pkt)
+    rec = Recorder()
+    engine._handle_inbound(rec, inbound_rst(pkt.dst_ip, pkt.dst_port, pkt.src_port), addr)
+    check("rst_ttl_check açıkken mesafe uyuşan RST geçirilir",
+          rec.forwarded == 1 and engine.stats.rst_blocked == 4)
+    engine.config = dpi_engine.PRESETS["hardened"]
+
+    engine._hops.clear()
+    engine._remember_flow(pkt)
 
     rec = Recorder()
     engine._handle_inbound(rec, inbound_rst(bytes([9, 9, 9, 9]), 443, 40000), addr)
@@ -311,6 +352,27 @@ def test_finder_and_diagnostics():
     import strategy_finder as sf
 
     check("agresiflik merdiveni tanımlı", len(dpi_engine.AGGRESSION_LADDER) >= 5)
+
+    # The strategy measured to work against a Turkish DPI box must be reached
+    # early, not after eight failed attempts.
+    ladder = dpi_engine.AGGRESSION_LADDER
+    check("kanıtlanmış strateji merdivende erken geliyor",
+          ladder.index("stateful") <= 2, f"index={ladder.index('stateful')}")
+    for name in ("ttnet", "superonline", "stateful"):
+        config = dpi_engine.PRESETS[name]
+        check(f"{name}: sahte paket doğru sıra numarasında (durum takipli DPI için)",
+              config.decoy_fooling == ("ttl",) and config.auto_ttl)
+        check(f"{name}: mesafe bilinmezken güvenli yedek TTL var",
+              0 < config.fake_ttl <= 8, f"fake_ttl={config.fake_ttl}")
+
+    engine = dpi_engine.NativeDpiEngine(dpi_engine.PRESETS["ttnet"])
+    server = bytes([1, 2, 3, 4])
+    check("mesafe bilinmezken yedek TTL kullanılır", engine._decoy_ttl(server) == 5)
+    engine._hops[server] = 12
+    check("mesafe öğrenilince ondan hesaplanır", engine._decoy_ttl(server) == 11)
+    engine._hops[server] = 2
+    check("sunucu çok yakınsa sahte paket gönderilmez — el sıkışma bozulmasın",
+          engine._decoy_ttl(server) is None)
     check("merdivendeki profillerin hepsi mevcut",
           all(name in dpi_engine.PRESETS for name in dpi_engine.AGGRESSION_LADDER))
     check("merdiven en hafiften başlar",
@@ -343,6 +405,122 @@ def test_finder_and_diagnostics():
     check("boş IP güvenli", diagnostics.mask_ip("") == "gizlendi")
 
 
+def test_native_fragmentation():
+    print("\n[9/10] IP parçalama (native fragmentation)")
+    hello = build_client_hello("gateway.discord.gg")
+    packet = build_ipv4_tcp(hello, seq=7000)
+    pkt = dp.parse_tcp_packet(packet)
+
+    # Checksums must be final before the split: the second fragment has no TCP
+    # header, so nothing downstream can compute them afterwards.
+    sealed = dp.seal_checksums(bytearray(packet), pkt)
+    check("IPv4 başlık sağlaması geçerli",
+          dp.ipv4_checksum(bytes(sealed[:pkt.ip_hlen])) == 0)
+
+    verify = dp.parse_tcp_packet(bytes(sealed))
+    stored = struct.unpack_from("!H", sealed, pkt.tcp_off + 16)[0]
+    check("TCP sağlaması pakete yazıldı", stored != 0)
+    check("yeniden hesaplanan sağlama pakettekiyle aynı",
+          dp.tcp_checksum(bytes(sealed), verify) == stored,
+          f"hesaplanan 0x{dp.tcp_checksum(bytes(sealed), verify):04x} != yazılan 0x{stored:04x}")
+
+    # Independent check: a receiver sums the segment *including* the checksum
+    # field and must land on 0xFFFF.
+    segment = bytes(sealed[pkt.tcp_off:])
+    pseudo = (pkt.src_ip + pkt.dst_ip + bytes([0, dp.PROTO_TCP])
+              + struct.pack("!H", len(segment)))
+    total = dp._ones_complement_sum(pseudo) + dp._ones_complement_sum(segment)
+    while total >> 16:
+        total = (total & 0xFFFF) + (total >> 16)
+    check("alıcı tarafında doğrulama 0xFFFF veriyor", total == 0xFFFF, f"got 0x{total:04x}")
+
+    span = dp.extract_sni(hello)
+    cut = pkt.tcp_hlen + span[1] + span[2] // 2
+    fragments = dp.fragment_ipv4(bytes(sealed), cut)
+    check("iki IP parçası üretildi", len(fragments) == 2, f"got {len(fragments)}")
+
+    first, second = fragments
+    flags_a = struct.unpack_from("!H", first, 6)[0]
+    flags_b = struct.unpack_from("!H", second, 6)[0]
+    check("ilk parçada MF biti açık", bool(flags_a & 0x2000))
+    check("son parçada MF biti kapalı", not (flags_b & 0x2000))
+    check("ikinci parçanın ofseti 8 baytın katı",
+          (flags_b & 0x1FFF) * 8 == len(first) - 20,
+          f"offset={(flags_b & 0x1FFF) * 8}, beklenen={len(first) - 20}")
+
+    for index, fragment in enumerate(fragments):
+        check(f"parça {index} IP sağlaması geçerli",
+              dp.ipv4_checksum(bytes(fragment[:20])) == 0)
+        check(f"parça {index} uzunluk alanı doğru",
+              struct.unpack_from("!H", fragment, 2)[0] == len(fragment))
+
+    reassembled = bytes(first[:20]) + bytes(first[20:]) + bytes(second[20:])
+    check("parçalar birleşince orijinali verir", reassembled[20:] == bytes(sealed)[20:])
+    check("hiçbir parçada alan adı bütün değil",
+          not any(b"gateway.discord.gg" in bytes(f[20:]) for f in fragments))
+
+    check("bölünemeyecek kadar küçük paket bölünmez",
+          len(dp.fragment_ipv4(bytes(sealed), 0)) == 1)
+    check("IPv6 paketi IP parçalamaya girmez",
+          len(dp.fragment_ipv4(build_ipv6_tcp(hello), 40)) == 1)
+
+
+def test_http_tricks_and_blacklist():
+    print("\n[10/10] HTTP hileleri & kara liste")
+    request = build_http_request("discord.com")
+
+    mixed = dp.mix_host_case(request)
+    check("Host değeri karışık büyük/küçük harf", b"Host: discord.com" not in mixed)
+    check("karıştırma uzunluğu bozmuyor", len(mixed) == len(request))
+    check("alan adı hâlâ aynı (harf duyarsız)",
+          dp.extract_http_host(mixed)[0].lower() == "discord.com")
+
+    swapped = dp.swap_http_spaces(request)
+    check("Host: sonrası boşluk kaldırıldı", b"Host:discord.com" in swapped)
+    check("metod sonrası fazladan boşluk eklendi", swapped.startswith(b"GET  /"))
+    check("boşluk takası uzunluğu KORUYOR — akış bozulmaz",
+          len(swapped) == len(request), f"{len(swapped)} != {len(request)}")
+
+    combined = dp.apply_http_tricks(request, mangle_name=True, mix_case=True, swap_spaces=True)
+    check("üç hile birlikte uzunluğu korur", len(combined) == len(request))
+    check("üç hile birlikte Host'u gizler", b"Host: discord.com" not in combined)
+
+    no_space = b"GET / HTTP/1.1\r\nHost:example.com\r\n\r\n"
+    check("boşluksuz istekte takas güvenle atlanır",
+          dp.swap_http_spaces(no_space) == no_space)
+
+    # Decoy hostnames must look like real hostnames, not truncated repeats
+    for length in (4, 11, 18, 30):
+        name = dp.decoy_hostname(length)
+        check(f"sahte alan adı {length} bayt ve geçerli biçimde",
+              len(name) == length and b"." in name and not name.endswith(b"."),
+              f"got {name!r}")
+
+    hello = build_client_hello("gateway.discord.gg")
+    decoy = dp.make_decoy_payload(hello, dp.extract_sni(hello)[1:])
+    decoy_host = dp.extract_sni(decoy)
+    check("sahte ClientHello ayrıştırılabilir kalıyor", decoy_host is not None)
+    check("sahte alan adı gerçek olanı gizliyor",
+          decoy_host and "discord" not in decoy_host[0])
+
+    # Blacklist file support (GoodbyeDPI's --blacklist)
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as handle:
+        handle.write("# yorum satırı\ndiscord.com\n.discord.gg\n\nexample.org # sonda yorum\n")
+        list_path = handle.name
+    try:
+        loaded = dpi_engine.load_hostname_list(list_path)
+        check("kara liste okundu", loaded == ("discord.com", "discord.gg", "example.org"),
+              f"got {loaded}")
+        config = dpi_engine.DpiConfig(hostnames=loaded)
+        check("listedeki alan adı eşleşir", config.matches_host("gateway.discord.gg"))
+        check("liste dışındaki alan adı atlanır", not config.matches_host("google.com"))
+    finally:
+        os.unlink(list_path)
+
+    check("liste yoksa boş döner", dpi_engine.load_hostname_list("yok-boyle-bir-dosya.txt") == ())
+
+
 def run_tests():
     print("=" * 62)
     print("  DISCORD DNS v3.6 -- NATIVE DPI ENGINE TEST SUITE")
@@ -356,6 +534,8 @@ def run_tests():
     test_engine_config()
     test_auto_ttl_and_rst()
     test_finder_and_diagnostics()
+    test_native_fragmentation()
+    test_http_tricks_and_blacklist()
 
     print("\n" + "=" * 62)
     print(f"  {PASSED} passed, {FAILED} failed")

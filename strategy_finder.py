@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import dpi_engine
+import doh_proxy
 
 logger = logging.getLogger("StrategyFinder")
 
@@ -50,6 +51,34 @@ class ProbeResult:
     def dns_hijacked(self) -> bool:
         """A wrong certificate on a reachable host means we were sent elsewhere."""
         return not self.ok and "CERTIFICATE_VERIFY_FAILED" in self.detail
+
+    @property
+    def sni_reset(self) -> bool:
+        """
+        The signature of an active SNI block: TCP connects, then the connection
+        dies the moment the hostname goes out. The ISP forges a reset.
+        """
+        return not self.ok and ("ConnectionResetError" in self.detail
+                                or "WinError 10054" in self.detail)
+
+    @property
+    def timed_out(self) -> bool:
+        return not self.ok and ("TimeoutError" in self.detail or "timed out" in self.detail)
+
+    @property
+    def diagnosis(self) -> str:
+        """Plain-language reason this probe failed, for the log and the report."""
+        if self.ok:
+            return "bağlandı"
+        if self.sni_reset:
+            return "SNI engeli — İSS bağlantıyı RST ile kesti"
+        if self.dns_hijacked:
+            return "DNS kaçırma — sahte sertifika sunuldu"
+        if self.timed_out:
+            return "zaman aşımı — paketler yutuluyor"
+        if "DoH" in self.detail:
+            return "şifreli DNS'e ulaşılamadı"
+        return self.detail
 
 
 @dataclass
@@ -83,21 +112,36 @@ class FinderReport:
     best: Optional[StrategyResult] = None
     bypass_needed: bool = True
     dns_hijack_suspected: bool = False
+    sni_block_detected: bool = False
+
+    @property
+    def block_kind(self) -> str:
+        """What kind of block this line uses, in one phrase."""
+        kinds = []
+        if self.dns_hijack_suspected:
+            kinds.append("DNS kaçırma")
+        if self.sni_block_detected:
+            kinds.append("SNI engeli (RST enjeksiyonu)")
+        if not kinds and self.bypass_needed:
+            kinds.append("bilinmeyen engel (zaman aşımı)")
+        return " + ".join(kinds) if kinds else "engel yok"
 
     def summary(self) -> str:
         if not self.bypass_needed:
             return ("Bu hatta engel görünmüyor — tüm hedeflere motor kapalıyken de "
                     "erişildi. DPI Bypass gerekmez.")
         if self.best is None:
-            base = ("Hiçbir profil hedeflerin tamamını açamadı. "
-                    if not self.dns_hijack_suspected else "")
+            reason = f"Tespit edilen engel türü: {self.block_kind}. "
+            if self.sni_block_detected:
+                return (reason + "Hiçbir profil bu DPI kutusunu aşamadı — "
+                        "daha agresif bir strateji ya da farklı bir bölme noktası gerekiyor.")
             if self.dns_hijack_suspected:
-                return (base + "Engel DNS katmanında görünüyor (sahte sertifika): "
-                        "Kanal 2 (şifreli DNS) bunu çözer, DPI profili çözmez.")
-            return base + "Daha agresif bir strateji gerekebilir."
-        extra = ""
+                return (reason + "Kanal 2 (şifreli DNS) bunu çözer, DPI profili çözmez.")
+            return reason + "Hiçbir profil hedeflerin tamamını açamadı."
+
+        extra = f" Engel türü: {self.block_kind}."
         if self.dns_hijack_suspected:
-            extra = " Ayrıca DNS kaçırma tespit edildi — Kanal 2'yi de açık tutun."
+            extra += " DNS kaçırma da var — Kanal 2'yi açık tutun."
         return (f"En uygun profil: {self.best.label} "
                 f"({self.best.score}/{self.best.total} hedef açıldı, "
                 f"ortanca {self.best.median_ms:.0f} ms).{extra}")
@@ -105,16 +149,35 @@ class FinderReport:
 
 # ─── Probing ─────────────────────────────────────────────────────────────────────
 
-def probe_host(host: str, timeout: float = PROBE_TIMEOUT_S) -> ProbeResult:
+def probe_host(host: str, timeout: float = PROBE_TIMEOUT_S,
+               resolve_over_doh: bool = True) -> ProbeResult:
     """
     A real, fully verified TLS handshake — the same thing a browser does.
-    Certificate verification stays ON, because a block page that answers with a
+    Certificate verification stays ON, because a block page answering with a
     forged certificate must count as a failure, not a success.
+
+    The address is resolved over HTTPS rather than through the system resolver.
+    That separation is the whole point of the probe: on a line whose ISP hijacks
+    DNS, a system lookup returns the block server, every probe times out, and the
+    scan concludes "no profile works" even when the engine is doing its job
+    perfectly. Resolving out of band puts the probe on the real server, so what
+    it measures is the DPI layer alone.
     """
-    ctx = ssl.create_default_context()
     started = time.time()
+    target = host
+
+    if resolve_over_doh:
+        try:
+            addresses = doh_proxy.resolve_a(host, timeout)
+            if addresses:
+                target = addresses[0]
+        except Exception as e:
+            return ProbeResult(host, False, (time.time() - started) * 1000,
+                               f"DoH çözümlemesi başarısız: {e}"[:120])
+
+    ctx = ssl.create_default_context()
     try:
-        with socket.create_connection((host, 443), timeout) as raw:
+        with socket.create_connection((target, 443), timeout) as raw:
             with ctx.wrap_socket(raw, server_hostname=host) as tls:
                 version = tls.version() or "TLS"
         return ProbeResult(host, True, (time.time() - started) * 1000, version)
@@ -156,8 +219,15 @@ def find_best_strategy(
 
     report = FinderReport(baseline=baseline)
     report.dns_hijack_suspected = any(p.dns_hijacked for p in baseline.probes)
+    report.sni_block_detected = any(p.sni_reset for p in baseline.probes)
+
+    for probe in baseline.probes:
+        if not probe.ok:
+            say(f"     {probe.host}: {probe.diagnosis}")
+    if report.sni_block_detected:
+        say("   ⚠ SNI engeli tespit edildi → DPI motorunun çözmesi gereken durum bu.")
     if report.dns_hijack_suspected:
-        say("   ⚠ Sahte sertifika görüldü → DNS kaçırma şüphesi (Kanal 2 gerekli).")
+        say("   ⚠ Sahte sertifika görüldü → DNS kaçırma (Kanal 2 gerekli).")
 
     if baseline.perfect:
         report.bypass_needed = False
