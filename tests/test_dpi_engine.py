@@ -92,7 +92,7 @@ def check(label: str, condition: bool, detail: str = "") -> None:
 # ─── Tests ───────────────────────────────────────────────────────────────────────
 
 def test_parsing():
-    print("\n[1/6] IPv4 / IPv6 TCP parsing")
+    print("\n[1/12] IPv4 / IPv6 TCP parsing")
     hello = build_client_hello()
     packet = build_ipv4_tcp(hello)
     pkt = dp.parse_tcp_packet(packet)
@@ -112,7 +112,7 @@ def test_parsing():
 
 
 def test_sni():
-    print("\n[2/6] TLS SNI extraction")
+    print("\n[2/12] TLS SNI extraction")
     for host in ("gateway.discord.gg", "discord.com", "a.io", "x" * 200 + ".com"):
         hello = build_client_hello(host)
         found = dp.extract_sni(hello)
@@ -129,7 +129,7 @@ def test_sni():
 
 
 def test_http():
-    print("\n[3/6] HTTP host handling")
+    print("\n[3/12] HTTP host handling")
     req = build_http_request("discord.com")
     kind, host, span = dp.describe_target(req)
     check("HTTP request classified", kind == "http", f"got {kind}")
@@ -142,7 +142,7 @@ def test_http():
 
 
 def test_split():
-    print("\n[4/6] Payload splitting")
+    print("\n[4/12] Payload splitting")
     hello = build_client_hello("gateway.discord.gg")
     positions = dp.choose_split_positions(hello, base_split=2, split_at_sni=True)
     check("two cut positions chosen", len(positions) == 2, f"got {positions}")
@@ -161,7 +161,7 @@ def test_split():
 
 
 def test_rebuild():
-    print("\n[5/6] Segment rebuilding & checksums")
+    print("\n[5/12] Segment rebuilding & checksums")
     hello = build_client_hello()
     pkt = dp.parse_tcp_packet(build_ipv4_tcp(hello, seq=5000))
 
@@ -207,7 +207,7 @@ def test_rebuild():
 
 
 def test_engine_config():
-    print("\n[6/6] Engine configuration")
+    print("\n[6/12] Engine configuration")
     check("presets defined", set(dpi_engine.PRESETS) >= {
         "superonline", "ttnet", "vodafone", "general", "discord_only"})
 
@@ -521,6 +521,165 @@ def test_http_tricks_and_blacklist():
     check("liste yoksa boş döner", dpi_engine.load_hostname_list("yok-boyle-bir-dosya.txt") == ())
 
 
+def test_heartbeat_detection():
+    print("\n[11/11] Kopma tespiti (hız ve doğruluk)")
+    import heartbeat_guard as hg
+
+    guard = hg.HeartbeatGuard()
+
+    # Timing: idle stays cheap, protection is watched closely, a failed check is
+    # confirmed within seconds instead of a whole cycle later.
+    guard.is_dns_active = False
+    guard.consecutive_failures = 0
+    check("koruma kapalıyken seyrek kontrol", guard._next_delay() == hg.HEARTBEAT_INTERVAL_S,
+          f"got {guard._next_delay()}")
+
+    guard.is_dns_active = True
+    check("koruma açıkken sık kontrol", guard._next_delay() == hg.ACTIVE_INTERVAL_S,
+          f"got {guard._next_delay()}")
+
+    guard.consecutive_failures = 1
+    check("başarısızlıktan sonra hızlı doğrulama",
+          guard._next_delay() == hg.CONFIRM_DELAY_S, f"got {guard._next_delay()}")
+
+    budget = guard.get_status()["detection_budget_s"]
+    check("tespit bütçesi 15 saniyenin altında", budget <= 15, f"got {budget}s")
+    check("eski 50 saniyelik bütçeden belirgin iyileşme",
+          budget < hg.HEARTBEAT_INTERVAL_S * hg.FAILURE_THRESHOLD,
+          f"{budget}s vs {hg.HEARTBEAT_INTERVAL_S * hg.FAILURE_THRESHOLD}s")
+
+    # Accuracy: the probe must reflect a real handshake, not a bare TCP connect.
+    # Measured on live lines, the TCP check was wrong in both directions.
+    import strategy_finder as sf
+
+    original = sf.probe_host
+    try:
+        sf.probe_host = lambda host, timeout=6.0, resolve_over_doh=True: sf.ProbeResult(
+            host, False, 120.0, "ConnectionResetError: reset by peer")
+        result = guard.probe()
+        check("SNI reseti kopma olarak görülüyor", result["ok"] is False)
+        check("teşhis metni taşınıyor", "SNI" in result.get("diagnosis", ""),
+              result.get("diagnosis"))
+
+        sf.probe_host = lambda host, timeout=6.0, resolve_over_doh=True: sf.ProbeResult(
+            host, True, 42.0, "TLSv1.3")
+        result = guard.probe()
+        check("gerçek el sıkışma başarılı sayılıyor", result["ok"] is True)
+        check("gecikme ölçülüyor", result["ping_ms"] == 42, f"got {result['ping_ms']}")
+
+        def explode(host, timeout=6.0, resolve_over_doh=True):
+            raise RuntimeError("sonda kullanılamıyor")
+        sf.probe_host = explode
+        fallback = guard.probe()
+        check("sonda çökerse TCP kontrolüne düşülüyor", "ok" in fallback)
+    finally:
+        sf.probe_host = original
+
+
+def test_settings_and_failover():
+    print("\n[12/12] Ayar kalıcılığı & yedekleme zinciri")
+    import tempfile
+    import heartbeat_guard as hg
+
+    # Config round-trip against a throwaway APPDATA so the real one is untouched
+    original_appdata = os.environ.get("APPDATA")
+    sandbox = tempfile.mkdtemp(prefix="ddns_cfg_")
+    try:
+        os.environ["APPDATA"] = sandbox
+        import importlib
+        import dns_manager
+        importlib.reload(dns_manager)
+
+        check("ayar yokken boş sözlük döner", dns_manager.load_config() == {})
+
+        settings = {
+            "version": 1,
+            "adapter": "Wi-Fi",
+            "channel": "⚡ Kanal 3: DPI Bypass",
+            "channel_manual": True,
+            "dns_preset": "Quad9",
+            "dns_preset_manual": True,
+            "dpi_profile": "discord_only",
+            "auto_restore_on_exit": False,
+        }
+        check("ayarlar diske yazılıyor", dns_manager.save_config(settings) is True)
+        loaded = dns_manager.load_config()
+        check("ayarlar aynen geri okunuyor", loaded == settings,
+              f"got {loaded}")
+        check("elle seçim işareti korunuyor", loaded.get("dns_preset_manual") is True)
+
+        # Türkçe karakterler ve emojiler bozulmamalı
+        check("kanal metni (emoji + Türkçe) bozulmuyor",
+              loaded["channel"] == "⚡ Kanal 3: DPI Bypass")
+    finally:
+        if original_appdata is not None:
+            os.environ["APPDATA"] = original_appdata
+        import importlib
+        import dns_manager
+        importlib.reload(dns_manager)
+        import shutil
+        shutil.rmtree(sandbox, ignore_errors=True)
+
+    # Failover chain: every provider reachable, ordered by measurement
+    guard = hg.HeartbeatGuard()
+    check("zincir altı sağlayıcıyı da kapsıyor", len(guard.chain) == 6, f"got {guard.chain}")
+    check("AdGuard artık zincirde", "AdGuard" in guard.chain)
+
+    guard.set_chain(["AdGuard", "Cloudflare", "Quad9", "Google", "OpenDNS", "ControlD"])
+    check("ölçülen sıraya göre yeniden dizilir", guard.chain[0] == "AdGuard")
+
+    guard.sync_preset("Quad9")
+    check("elle seçilen profil zincirde bulunur", guard.chain[guard.current_preset_index] == "Quad9")
+
+    before = list(guard.chain)
+    guard.set_chain(["BöyleBirSağlayıcıYok"])
+    check("geçersiz liste zinciri bozmuyor", guard.chain == before)
+
+    guard.set_chain(["Google", "Cloudflare"])
+    check("kısaltılmış zincirde konum korunur veya sıfırlanır",
+          0 <= guard.current_preset_index < len(guard.chain))
+
+    # Autostart. The system state is left alone: creating or deleting a real
+    # startup entry from a test run would change the user's machine.
+    import dns_manager as dm
+    command = dm._startup_command()
+    check("başlangıç komutu tırnaklı ve çalıştırılabilir",
+          command.startswith('"') and command.count('"') >= 2, command)
+    check("başlangıç komutu geçerli bir hedef gösteriyor",
+          command.rstrip('"').endswith((".exe", ".py")), command)
+    check("başlangıç modu bilinen bir değer",
+          dm.autostart_mode() in ("task", "registry", "off"))
+
+    # A domain list restricts the engine; an empty one must not
+    import tempfile as tf
+    handle = tf.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
+    handle.write("# yorum\ndiscord.com\n\n  discord.gg  \n")
+    handle.close()
+    try:
+        listed = dpi_engine.load_hostname_list(handle.name)
+        check("liste dosyası boşluk ve yorumları temizliyor",
+              listed == ("discord.com", "discord.gg"), f"got {listed}")
+    finally:
+        os.unlink(handle.name)
+
+    empty = tf.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
+    empty.write("# sadece yorum\n\n")
+    empty.close()
+    try:
+        check("boş liste kısıtlama getirmiyor",
+              dpi_engine.load_hostname_list(empty.name) == ())
+    finally:
+        os.unlink(empty.name)
+
+    # discord_only stays out of the automatic ladder but must be selectable
+    check("'discord_only' otomatik taramada yok",
+          "discord_only" not in dpi_engine.AGGRESSION_LADDER)
+    check("'discord_only' profili tanımlı", "discord_only" in dpi_engine.PRESETS)
+    check("'discord_only' yalnızca Discord'a dokunur",
+          dpi_engine.PRESETS["discord_only"].matches_host("gateway.discord.gg")
+          and not dpi_engine.PRESETS["discord_only"].matches_host("google.com"))
+
+
 def run_tests():
     print("=" * 62)
     print("  DISCORD DNS v3.6 -- NATIVE DPI ENGINE TEST SUITE")
@@ -536,6 +695,8 @@ def run_tests():
     test_finder_and_diagnostics()
     test_native_fragmentation()
     test_http_tricks_and_blacklist()
+    test_heartbeat_detection()
+    test_settings_and_failover()
 
     print("\n" + "=" * 62)
     print(f"  {PASSED} passed, {FAILED} failed")

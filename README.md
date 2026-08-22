@@ -24,8 +24,9 @@ Uygulama; **TürkNet** kullanıcılarından **Superonline Fiber** ve **Türk Tel
 
 ## ✨ Öne Çıkan Özellikler
 
-### 🌐 1. Akıllı İSS Tespiti (Smart ISP Detector)
-- Uygulama başlatıldığında internet sağlayıcınızı (`TürkNet`, `Superonline`, `Türk Telekom`, `Vodafone`, `KabloNet` vb.) arka planda otomatik tespit eder.
+### 🌐 1. Akıllı İSS Tespiti & Otomatik Hazırlık
+- Uygulama başlatıldığında internet sağlayıcınızı (`TürkNet`, `Superonline`, `Türk Telekom / Avea`, `Vodafone`, `KabloNet` vb.) arka planda otomatik tespit eder.
+- Aynı anda altı DNS sağlayıcısını ölçer ve **en hızlısını kendiliğinden seçer** — siz açtığınızda bağlantı ekranı çoktan hazırdır (elle bir profil seçtiyseniz ona dokunmaz).
 - İSS'nizin engelleme türüne göre (DNS Yönlendirmesi / SNI Bloklama) en uygun kanalı otomatik tavsiye eder ve seçer.
 
 ### 🔀 2. Üç Farklı Bağlantı Kanalı (Multi-Channel Switching)
@@ -149,6 +150,8 @@ python -m tests.test_dpi_live
 
 ## 🔌 VPN Gibi Çalışır: Bağlan / Bağlantıyı Kes
 
+Arayüz de buna göre kurulmuştur: **bağlantı paneli ilk ekranda** — kanal seçimi, DPI profili, bağlantı durumu ve **BAĞLAN** butonu, hiç kaydırmadan görünür. Pencere sabit bir piksel boyutuyla değil, ekranınıza ve içeriğin gerçek genişliğine göre açılır; yüksek DPI ekranlarda içerik kesilmez.
+
 Tek buton, beş durum — ve her ikisi de **doğrulanır**:
 
 | Durum | Buton | Ne oluyor |
@@ -163,9 +166,23 @@ Tek buton, beş durum — ve her ikisi de **doğrulanır**:
 
 **BAĞLANTIYI KES** motorları durdurur, **kendi orijinal DNS sunucularınızı** geri yükler (DHCP'ye değil) ve sonra **doğrular**: motor gerçekten durdu mu, çözümleyici kapandı mı, ağ kartı hâlâ `127.0.0.1`'e mi bakıyor. Eksik kalan bir şey varsa açıkça söyler.
 
-**Otomatik toparlama:** Bağlıyken İSS davranışını değiştirirse (heartbeat üst üste başarısız olursa) uygulama kendi kendine çalışan yeni bir strateji arar ve ona geçer — siz hiçbir şey yapmadan.
+**Otomatik toparlama:** Bağlıyken İSS davranışını değiştirirse uygulama kendi kendine çalışan yeni bir strateji arar ve ona geçer — siz hiçbir şey yapmadan.
 
-**DPI profili seçici:** VPN'lerdeki sunucu listesi gibi; `Otomatik (İSS'ye göre)` bırakabilir ya da dokuz profilden birini elle seçebilirsiniz.
+**Kopma tespiti ~12 saniye.** Koruma açıkken kontrol aralığı 10 saniyeye iner ve başarısız bir kontrol tam tur beklemeden 2 saniye içinde doğrulanır (önceden iki adet 25 saniyelik tur, yani ~50 saniye).
+
+Kontrolün kendisi de değişti: eskiden yalnızca TCP bağlantısı kuruluyordu, bu da Türkiye hatlarında **iki yönde birden yanlış** sonuç veriyordu — DNS kaçırılan hatta bağlantı engel sunucusuna oturup "çalışıyor" diyordu, engel sunucusuna erişilemeyen hatta ise uygulamanın kendi şifreli yolu sorunsuz çalışırken "koptu" diyordu. Artık şifreli DNS ile çözülmüş gerçek adrese tam TLS el sıkışması yapılır ve başarısızlığın nedeni (SNI reseti / DNS kaçırma / zaman aşımı) günlüğe yazılır.
+
+**DPI profili seçici:** VPN'lerdeki sunucu listesi gibi; `Otomatik (İSS'ye göre)` bırakabilir ya da profillerden birini elle seçebilirsiniz — yalnızca Discord alan adlarına dokunan `Sadece Discord` profili dahil.
+
+**Ayarlarınız hatırlanır.** Seçtiğiniz kanal, DNS sağlayıcısı, DPI profili ve ağ kartı bir sonraki açılışta hazır gelir. Elle yaptığınız seçimler, otomatik tespit ve hız testi tarafından **ezilmez** — uygulama ölçümü bildirir, kararı size bırakır.
+
+**Windows ile başlat — yönetici olarak, UAC sormadan.** Tek kutucukla uygulama açılışta başlatılır. Bu iş için kayıt defteri `Run` anahtarı yerine **yönetici yetkili zamanlanmış görev** kullanılır; çünkü `Run` anahtarı uygulamayı yetkisiz başlatır ve her açılışta UAC onayı sorulmasına yol açar. Yönetici yetkisi yoksa uygulama `Run` anahtarına düşer ve bunu size açıkça söyler.
+
+**Açılışta otomatik bağlan.** İkinci bir kutucukla uygulama açılır açılmaz (İSS tespiti ve hız testi bittikten sonra) kendiliğinden bağlanır. İkisi birlikte, Windows servisi kurmadan "açılıştan itibaren koruma" davranışını verir.
+
+**Alan adı listesi artık uygulama içinden düzenlenir.** Günlük çubuğundaki `📝 Liste` düğmesi listeyi açar; `Discord alan adlarını doldur` ile tek tıkta hazırlanır. Liste boş bırakılırsa motor tüm trafiğe uygulanır.
+
+**Yedekleme zinciri ölçüme göre sıralanır.** Heartbeat bir sağlayıcıda sorun görürse altı sağlayıcının hepsine geçebilir ve sıra, hız testinin ölçtüğü gecikmeye göre belirlenir — daha yavaş bir sağlayıcıya düşmez. (Önceden zincir üç sağlayıcıyla sınırlıydı ve uygulamanın kendi ölçtüğü en hızlı sağlayıcı bile dışarıda kalabiliyordu.)
 
 ---
 
