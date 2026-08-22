@@ -168,6 +168,8 @@ class DiscordDNSApp(ctk.CTk):
         self.auto_restore_on_exit = tk.BooleanVar(
             value=bool(self._config.get("auto_restore_on_exit", True)))
         self.autostart_var        = tk.BooleanVar(value=dns_manager.is_autostart_enabled())
+        self.auto_connect_var     = tk.BooleanVar(
+            value=bool(self._config.get("auto_connect_on_start", False)))
         self.dns_active_start_time = None
         self.doh_enabled_var       = tk.BooleanVar(value=False)
         self._autopilot_last_adapter = self.selected_adapter
@@ -201,6 +203,8 @@ class DiscordDNSApp(ctk.CTk):
         # the fastest one for this location. The user had to press a button for
         # this before, which meant most people simply connected on the default.
         self.after(1500, self._start_dns_benchmark)
+        # Late enough that detection and the speed test have settled
+        self.after(6000, self._maybe_auto_connect)
 
         # X button → minimize to tray (not quit)
         self.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
@@ -794,6 +798,19 @@ class DiscordDNSApp(ctk.CTk):
         )
         self.autostart_chk.pack(anchor="w", padx=22, pady=(4, 2))
 
+        self.auto_connect_chk = ctk.CTkCheckBox(
+            frame,
+            text="⚡ Uygulama açıldığında otomatik bağlan",
+            variable=self.auto_connect_var,
+            command=self.toggle_auto_connect,
+            font=ctk.CTkFont(family="Segoe UI Variable", size=11),
+            text_color=TEXT_DIM,
+            fg_color=BLURPLE, hover_color=BLURPLE_DIM,
+            checkmark_color="#FFF", border_color=BORDER,
+            corner_radius=6
+        )
+        self.auto_connect_chk.pack(anchor="w", padx=22, pady=(4, 2))
+
         self.auto_chk = ctk.CTkCheckBox(
             frame,
             text="Çıkışta orijinal DNS'e otomatik geri dön",
@@ -959,6 +976,15 @@ class DiscordDNSApp(ctk.CTk):
 
         btn_frame = ctk.CTkFrame(top, fg_color="transparent")
         btn_frame.grid(row=0, column=1, sticky="e")
+
+        ctk.CTkButton(
+            btn_frame, text="📝 Liste",
+            font=ctk.CTkFont(family="Segoe UI Variable", size=11),
+            fg_color=SURFACE, hover_color=BORDER,
+            text_color=TEXT_MUTED,
+            height=26, width=70, corner_radius=6,
+            command=self.open_blacklist_editor
+        ).pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
             btn_frame, text="🎯 Strateji Bul",
@@ -1418,6 +1444,7 @@ class DiscordDNSApp(ctk.CTk):
                 "dns_preset_manual": self._preset_user_chosen,
                 "dpi_profile": self.selected_profile,
                 "auto_restore_on_exit": bool(self.auto_restore_on_exit.get()),
+                "auto_connect_on_start": bool(self.auto_connect_var.get()),
             })
         except Exception as e:
             self.log(f"Ayarlar kaydedilemedi: {e}")
@@ -1425,12 +1452,33 @@ class DiscordDNSApp(ctk.CTk):
     def toggle_autostart(self):
         """Add or remove the app from Windows startup."""
         enable = bool(self.autostart_var.get())
-        if dns_manager.set_autostart(enable):
-            self.log("🚀 Windows ile birlikte başlatma açıldı." if enable
-                     else "Windows ile birlikte başlatma kapatıldı.")
-        else:
-            self.log("✗ Başlangıç kaydı değiştirilemedi (yetki gerekebilir).")
+        ok, message = dns_manager.set_autostart(enable)
+        self.log(("🚀 " if ok and enable else "") + message)
+        if not ok:
             self.autostart_var.set(dns_manager.is_autostart_enabled())
+        self._save_settings()
+
+    def toggle_auto_connect(self):
+        """Whether protection should come up by itself when the app starts."""
+        self._save_settings()
+        if self.auto_connect_var.get():
+            self.log("Açılışta otomatik bağlanma açık — uygulama başlar başlamaz korur.")
+        else:
+            self.log("Açılışta otomatik bağlanma kapalı.")
+
+    def _maybe_auto_connect(self):
+        """
+        Connect on launch when the user asked for it.
+
+        Waits for ISP detection and the speed test to finish first, so the
+        automatic connection uses the same settings the user would have seen.
+        """
+        if not self._alive() or not self.auto_connect_var.get():
+            return
+        if not self.is_admin_user or self.connection_state != "disconnected":
+            return
+        self.log("⚡ Açılışta otomatik bağlanma başlatılıyor…")
+        self.toggle_dns()
 
     def _display_scaling(self) -> float:
         """
@@ -2092,6 +2140,85 @@ class DiscordDNSApp(ctk.CTk):
             self.log("↪ Öneri: Kanal 3 (DPI Bypass) veya 🎯 Strateji Bul.")
         elif kind in ("dns_hijack", "mitm") and "Kanal 2" not in self.active_channel:
             self.log("↪ Öneri: Kanal 2 (şifreli DNS).")
+
+    def open_blacklist_editor(self):
+        """
+        Edit the domain list from inside the app.
+
+        The engine has always been able to restrict itself to a list of domains,
+        but the only way to write that list was to create a file by hand in
+        %APPDATA% — so in practice nobody used it.
+        """
+        path = os.path.join(dns_manager._get_backup_dir(), "blacklist.txt")
+
+        window = ctk.CTkToplevel(self)
+        window.title("📝 Alan Adı Listesi")
+        window.geometry("560x520")
+        window.configure(fg_color=BG)
+        window.transient(self)
+
+        ctk.CTkLabel(
+            window,
+            text=("Motor yalnızca buradaki alan adlarına dokunur.\n"
+                  "Liste boş bırakılırsa tüm trafiğe uygulanır."),
+            font=ctk.CTkFont(family="Segoe UI Variable", size=12),
+            text_color=TEXT_DIM, justify="left"
+        ).pack(anchor="w", padx=18, pady=(16, 6))
+
+        box = ctk.CTkTextbox(
+            window, fg_color=CONSOLE_BG, text_color=CYAN,
+            font=ctk.CTkFont(family="Cascadia Code", size=12),
+            corner_radius=10, border_width=1, border_color=BORDER
+        )
+        box.pack(fill="both", expand=True, padx=18, pady=(0, 8))
+
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                box.insert("end", handle.read())
+        except FileNotFoundError:
+            box.insert("end", "# Satır başına bir alan adı, # ile yorum\n")
+
+        status = ctk.CTkLabel(
+            window, text=f"Dosya: {path}",
+            font=ctk.CTkFont(family="Segoe UI Variable", size=10),
+            text_color=TEXT_FAINT
+        )
+        status.pack(anchor="w", padx=18)
+
+        bar = ctk.CTkFrame(window, fg_color="transparent")
+        bar.pack(fill="x", padx=18, pady=(6, 16))
+
+        def fill_discord():
+            box.delete("1.0", "end")
+            listed = "\n".join(dpi_engine.PRESETS["discord_only"].hostnames)
+            box.insert("end", "# Yalnızca Discord\n" + listed + "\n")
+
+        def save():
+            try:
+                with open(path, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(box.get("1.0", "end").strip() + "\n")
+            except Exception as e:
+                status.configure(text=f"Kaydedilemedi: {e}", text_color=RED)
+                return
+            listed = dpi_engine.load_hostname_list(path)
+            status.configure(
+                text=(f"Kaydedildi — {len(listed)} alan adı" if listed
+                      else "Kaydedildi — liste boş, motor tüm trafiğe uygulanır"),
+                text_color=GREEN
+            )
+            self.log(f"📝 Alan adı listesi kaydedildi: {len(listed)} kayıt.")
+            if self.connection_state == "connected":
+                self.log("↪ Değişikliğin geçerli olması için bağlantıyı kesip yeniden bağlanın.")
+
+        ctk.CTkButton(bar, text="💾 Kaydet", command=save,
+                      fg_color=BLURPLE, hover_color=BLURPLE_DIM,
+                      height=32, corner_radius=8).pack(side="left")
+        ctk.CTkButton(bar, text="Discord alan adlarını doldur", command=fill_discord,
+                      fg_color=SURFACE, hover_color=BORDER, text_color=TEXT_MUTED,
+                      height=32, corner_radius=8).pack(side="left", padx=8)
+        ctk.CTkButton(bar, text="Kapat", command=window.destroy,
+                      fg_color=SURFACE, hover_color=BORDER, text_color=TEXT_MUTED,
+                      height=32, width=80, corner_radius=8).pack(side="right")
 
     def open_diagnostics(self):
         """Collect a shareable diagnostic report and show it in its own window."""

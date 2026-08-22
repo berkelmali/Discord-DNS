@@ -639,6 +639,38 @@ def test_settings_and_failover():
     check("kısaltılmış zincirde konum korunur veya sıfırlanır",
           0 <= guard.current_preset_index < len(guard.chain))
 
+    # Autostart. The system state is left alone: creating or deleting a real
+    # startup entry from a test run would change the user's machine.
+    import dns_manager as dm
+    command = dm._startup_command()
+    check("başlangıç komutu tırnaklı ve çalıştırılabilir",
+          command.startswith('"') and command.count('"') >= 2, command)
+    check("başlangıç komutu geçerli bir hedef gösteriyor",
+          command.rstrip('"').endswith((".exe", ".py")), command)
+    check("başlangıç modu bilinen bir değer",
+          dm.autostart_mode() in ("task", "registry", "off"))
+
+    # A domain list restricts the engine; an empty one must not
+    import tempfile as tf
+    handle = tf.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
+    handle.write("# yorum\ndiscord.com\n\n  discord.gg  \n")
+    handle.close()
+    try:
+        listed = dpi_engine.load_hostname_list(handle.name)
+        check("liste dosyası boşluk ve yorumları temizliyor",
+              listed == ("discord.com", "discord.gg"), f"got {listed}")
+    finally:
+        os.unlink(handle.name)
+
+    empty = tf.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
+    empty.write("# sadece yorum\n\n")
+    empty.close()
+    try:
+        check("boş liste kısıtlama getirmiyor",
+              dpi_engine.load_hostname_list(empty.name) == ())
+    finally:
+        os.unlink(empty.name)
+
     # discord_only stays out of the automatic ladder but must be selectable
     check("'discord_only' otomatik taramada yok",
           "discord_only" not in dpi_engine.AGGRESSION_LADDER)

@@ -435,32 +435,117 @@ def load_config() -> dict:
 
 REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_REG_KEY = "DiscordDNS"
+TASK_NAME = "DiscordDNS_Autostart"
 
-def set_autostart(enable: bool = True) -> bool:
-    """Add or remove app from Windows Startup Registry."""
+
+def _startup_command() -> str:
+    """The command Windows should run at logon, quoted for the task scheduler."""
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+
+    # argv[0] is not always a script path — an interactive session or `python -c`
+    # leaves something that would be written into the registry as a broken
+    # command. Fall back to the entry point next to this module.
+    candidate = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    if not candidate.lower().endswith(".py") or not os.path.isfile(candidate):
+        candidate = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+    return f'"{sys.executable}" "{candidate}"'
+
+
+def _schtasks(args: list) -> tuple:
+    """Run schtasks and return (exit_code, output)."""
+    try:
+        done = subprocess.run(["schtasks"] + args, capture_output=True,
+                              creationflags=CREATE_NO_WINDOW)
+        out = (done.stdout or b"").decode("utf-8", "replace") + \
+              (done.stderr or b"").decode("utf-8", "replace")
+        return done.returncode, out.strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+def _set_run_key(enable: bool) -> bool:
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_ALL_ACCESS)
-        if enable:
-            exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
-            winreg.SetValueEx(key, APP_REG_KEY, 0, winreg.REG_SZ, f'"{exe_path}"')
-        else:
-            try:
-                winreg.DeleteValue(key, APP_REG_KEY)
-            except FileNotFoundError:
-                pass
-        winreg.CloseKey(key)
-        return True
+        try:
+            if enable:
+                winreg.SetValueEx(key, APP_REG_KEY, 0, winreg.REG_SZ, _startup_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, APP_REG_KEY)
+                except FileNotFoundError:
+                    pass
+            return True
+        finally:
+            winreg.CloseKey(key)
     except Exception:
         return False
 
-def is_autostart_enabled() -> bool:
-    """Check if app is configured to run at Windows startup."""
+
+def _has_run_key() -> bool:
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_PATH, 0, winreg.KEY_READ)
-        val, _ = winreg.QueryValueEx(key, APP_REG_KEY)
-        winreg.CloseKey(key)
-        return bool(val)
+        try:
+            value, _ = winreg.QueryValueEx(key, APP_REG_KEY)
+            return bool(value)
+        finally:
+            winreg.CloseKey(key)
     except Exception:
         return False
+
+
+def _has_scheduled_task() -> bool:
+    code, _ = _schtasks(["/Query", "/TN", TASK_NAME])
+    return code == 0
+
+
+def set_autostart(enable: bool = True) -> tuple[bool, str]:
+    """
+    Start with Windows — with the privileges the app actually needs.
+
+    The Run registry key launches the app as a standard user, and since every
+    useful action here requires elevation, that produces a UAC prompt at every
+    single logon (and an app that can do nothing if the prompt is dismissed).
+    A scheduled task set to run at logon with highest privileges starts elevated
+    and silently, which is the behaviour people expect from this kind of tool.
+
+    Creating that task needs Administrator rights, so when they are missing the
+    registry key is used instead and the caller is told plainly that Windows
+    will ask for confirmation each time.
+    """
+    if not enable:
+        _schtasks(["/Delete", "/TN", TASK_NAME, "/F"])
+        _set_run_key(False)
+        return True, "Windows ile başlatma kapatıldı."
+
+    code, output = _schtasks([
+        "/Create", "/TN", TASK_NAME, "/TR", _startup_command(),
+        "/SC", "ONLOGON", "/RL", "HIGHEST", "/F",
+    ])
+    if code == 0:
+        # Two autostart entries would launch two copies of the app
+        _set_run_key(False)
+        return True, "Windows ile başlatma açıldı (yönetici olarak, UAC sormadan)."
+
+    if _set_run_key(True):
+        return True, ("Windows ile başlatma açıldı, ancak yönetici görevi "
+                      "oluşturulamadı — her açılışta UAC onayı istenecek. "
+                      "Uygulamayı yönetici olarak açıp tekrar işaretlerseniz "
+                      "sessiz başlatmaya geçer.")
+    return False, f"Başlangıç kaydı oluşturulamadı: {output[:120]}"
+
+
+def is_autostart_enabled() -> bool:
+    """True when the app is set to start with Windows, by either mechanism."""
+    return _has_scheduled_task() or _has_run_key()
+
+
+def autostart_mode() -> str:
+    """"task" (elevated, silent), "registry" (prompts for UAC) or "off"."""
+    if _has_scheduled_task():
+        return "task"
+    if _has_run_key():
+        return "registry"
+    return "off"

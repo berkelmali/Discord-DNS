@@ -176,7 +176,11 @@ Kontrolün kendisi de değişti: eskiden yalnızca TCP bağlantısı kuruluyordu
 
 **Ayarlarınız hatırlanır.** Seçtiğiniz kanal, DNS sağlayıcısı, DPI profili ve ağ kartı bir sonraki açılışta hazır gelir. Elle yaptığınız seçimler, otomatik tespit ve hız testi tarafından **ezilmez** — uygulama ölçümü bildirir, kararı size bırakır.
 
-**Windows ile başlat.** Tek kutucukla uygulama açılışta otomatik başlatılır (kayıt defteri `Run` anahtarı; istediğinizde aynı kutucukla geri alınır).
+**Windows ile başlat — yönetici olarak, UAC sormadan.** Tek kutucukla uygulama açılışta başlatılır. Bu iş için kayıt defteri `Run` anahtarı yerine **yönetici yetkili zamanlanmış görev** kullanılır; çünkü `Run` anahtarı uygulamayı yetkisiz başlatır ve her açılışta UAC onayı sorulmasına yol açar. Yönetici yetkisi yoksa uygulama `Run` anahtarına düşer ve bunu size açıkça söyler.
+
+**Açılışta otomatik bağlan.** İkinci bir kutucukla uygulama açılır açılmaz (İSS tespiti ve hız testi bittikten sonra) kendiliğinden bağlanır. İkisi birlikte, Windows servisi kurmadan "açılıştan itibaren koruma" davranışını verir.
+
+**Alan adı listesi artık uygulama içinden düzenlenir.** Günlük çubuğundaki `📝 Liste` düğmesi listeyi açar; `Discord alan adlarını doldur` ile tek tıkta hazırlanır. Liste boş bırakılırsa motor tüm trafiğe uygulanır.
 
 **Yedekleme zinciri ölçüme göre sıralanır.** Heartbeat bir sağlayıcıda sorun görürse altı sağlayıcının hepsine geçebilir ve sıra, hız testinin ölçtüğü gecikmeye göre belirlenir — daha yavaş bir sağlayıcıya düşmez. (Önceden zincir üç sağlayıcıyla sınırlıydı ve uygulamanın kendi ölçtüğü en hızlı sağlayıcı bile dışarıda kalabiliyordu.)
 
