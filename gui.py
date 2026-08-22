@@ -147,23 +147,31 @@ class DiscordDNSApp(ctk.CTk):
                 pass
 
         # State
+        # Restore what the user chose last time before any widget is built, so
+        # the window opens on their settings instead of resetting every launch.
+        self._config = dns_manager.load_config() or {}
         self._cleanup_done        = False
         self._last_block_kind     = None
         self.connection_state     = "disconnected"
-        self.selected_profile     = None   # manual DPI profile override
+        self.selected_profile     = self._config.get("dpi_profile")
         self._recovery_running    = False  # auto-recovery in flight
-        self._preset_user_chosen  = False  # user picked a DNS profile by hand
+        self._preset_user_chosen  = bool(self._config.get("dns_preset_manual"))
+        self._channel_user_chosen = bool(self._config.get("channel_manual"))
         self.is_admin_user        = admin_utils.is_admin()
         self.adapters             = dns_manager.get_network_adapters()
-        self.selected_adapter     = self.adapters[0] if self.adapters else "Wi-Fi"
-        self.current_preset       = "Cloudflare"
+        saved_adapter = self._config.get("adapter")
+        self.selected_adapter     = (saved_adapter if saved_adapter in self.adapters
+                                     else (self.adapters[0] if self.adapters else "Wi-Fi"))
+        self.current_preset       = self._config.get("dns_preset") or "Cloudflare"
         self.dns_state            = None
         self.user_dns_enabled     = False
-        self.auto_restore_on_exit = tk.BooleanVar(value=True)
+        self.auto_restore_on_exit = tk.BooleanVar(
+            value=bool(self._config.get("auto_restore_on_exit", True)))
+        self.autostart_var        = tk.BooleanVar(value=dns_manager.is_autostart_enabled())
         self.dns_active_start_time = None
         self.doh_enabled_var       = tk.BooleanVar(value=False)
         self._autopilot_last_adapter = self.selected_adapter
-        self.active_channel        = "Kanal 1: Standart"
+        self.active_channel        = self._config.get("channel") or "Kanal 1: Standart"
         self.isp_info              = {"isp": "Algılanıyor...", "recommendation_text": "İSS Tespiti Yapılıyor..."}
 
         # Ensure app starts with normal DNS (DHCP) on launch until user presses button
@@ -397,9 +405,13 @@ class DiscordDNSApp(ctk.CTk):
         elif "DoH" in info.get("recommended_channel", ""):
             recommended = "🔒 Kanal 2: DoH Şifreli"
 
+        if recommended and self._channel_user_chosen:
+            self.log(f"↪ Öneri: {recommended} — sizin seçiminiz korunuyor.")
+            recommended = None
+
         if recommended:
             self.channel_seg.set(recommended)
-            self.on_channel_change(recommended)
+            self.on_channel_change(recommended, user_initiated=False)
 
     # ── STATUS CARDS ───────────────────────────────────────────────────────────────
 
@@ -681,8 +693,13 @@ class DiscordDNSApp(ctk.CTk):
 
         self.profile_dropdown = ctk.CTkOptionMenu(
             sel,
+            # discord_only is deliberately outside the aggression ladder — the
+            # scan should not pick a Discord-only profile on its own — but it
+            # still belongs in the menu for people who want the engine to leave
+            # the rest of their traffic completely untouched.
             values=["Otomatik (İSS'ye göre)"] + [
-                dpi_engine.PRESETS[name].name for name in dpi_engine.AGGRESSION_LADDER
+                dpi_engine.PRESETS[name].name
+                for name in list(dpi_engine.AGGRESSION_LADDER) + ["discord_only"]
             ],
             command=self.on_profile_change,
             fg_color=SURFACE, button_color=BORDER,
@@ -764,10 +781,24 @@ class DiscordDNSApp(ctk.CTk):
         )
         self.doh_chk.pack(anchor="w", padx=22, pady=(4, 2))
 
+        self.autostart_chk = ctk.CTkCheckBox(
+            frame,
+            text="🚀 Windows açıldığında uygulamayı başlat",
+            variable=self.autostart_var,
+            command=self.toggle_autostart,
+            font=ctk.CTkFont(family="Segoe UI Variable", size=11),
+            text_color=TEXT_DIM,
+            fg_color=BLURPLE, hover_color=BLURPLE_DIM,
+            checkmark_color="#FFF", border_color=BORDER,
+            corner_radius=6
+        )
+        self.autostart_chk.pack(anchor="w", padx=22, pady=(4, 2))
+
         self.auto_chk = ctk.CTkCheckBox(
             frame,
             text="Çıkışta orijinal DNS'e otomatik geri dön",
             variable=self.auto_restore_on_exit,
+            command=self._save_settings,
             font=ctk.CTkFont(family="Segoe UI Variable", size=11),
             text_color=TEXT_DIM,
             fg_color=GREEN, hover_color=GREEN_DIM,
@@ -1174,6 +1205,8 @@ class DiscordDNSApp(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════════════════════
 
     def _start_dns_benchmark(self):
+        if not self._alive():
+            return
         self.bench_btn.configure(text="Taranıyor...", state="disabled")
         for w in self._bench_widgets.values():
             w["lbl"].configure(text="…", text_color=TEXT_FAINT)
@@ -1218,6 +1251,14 @@ class DiscordDNSApp(ctk.CTk):
                      f"({results[fastest_name]['ms']} ms) — bağlanmaya hazır.")
             self._sync_action_button()
 
+        # Order the failover chain by what was actually measured, so a fallback
+        # never lands on a provider slower than the one that just failed.
+        ranked = [name for name, data in
+                  sorted(results.items(), key=lambda kv: kv[1].get("ms", 9999))
+                  if data.get("ok")]
+        if ranked and self._guard:
+            self._guard.set_chain(ranked)
+
     def _start_adapter_autopilot(self):
         def _loop():
             while True:
@@ -1248,6 +1289,7 @@ class DiscordDNSApp(ctk.CTk):
 
     def on_adapter_change(self, choice):
         self.selected_adapter = choice
+        self._save_settings()
         if self._guard:
             self._guard.adapter_name = choice
         self.log(f"Ağ kartı: {choice}")
@@ -1256,13 +1298,16 @@ class DiscordDNSApp(ctk.CTk):
     def on_preset_change(self, choice):
         self.current_preset = choice
         self._preset_user_chosen = True
+        self._save_settings()
         if self._guard:
             self._guard.sync_preset(self.current_preset)
         self.log(f"Profil: {self.current_preset}")
         self._sync_action_button()
 
-    def on_channel_change(self, choice):
+    def on_channel_change(self, choice, user_initiated: bool = True):
         self.active_channel = choice
+        if user_initiated:
+            self._channel_user_chosen = True
         if "Kanal 1" in choice:
             self.chan_desc_lbl.configure(text="🟢 Kanal 1: TürkNet ve engelsiz İSS'ler için hızlı Cloudflare DNS.")
         elif "Kanal 2" in choice:
@@ -1280,6 +1325,7 @@ class DiscordDNSApp(ctk.CTk):
             pass
 
         self.log(f"Kanal Değişti: {choice}")
+        self._save_settings()
         self._sync_action_button()
 
     def _maybe_auto_recover(self, failures: int):
@@ -1328,15 +1374,63 @@ class DiscordDNSApp(ctk.CTk):
         if choice.startswith("Otomatik"):
             self.selected_profile = None
             self.log("DPI profili: otomatik (İSS tespitine göre)")
+            self._save_settings()
             return
         for name in dpi_engine.PRESETS:
             if dpi_engine.PRESETS[name].name == choice:
                 self.selected_profile = name
                 config = dpi_engine.PRESETS[name]
                 self.log(f"DPI profili: {config.name} — {config.description}")
+                self._save_settings()
                 if self.connection_state == "connected":
                     self.log("↪ Değişikliğin geçerli olması için bağlantıyı kesip yeniden bağlanın.")
                 return
+
+    def _alive(self) -> bool:
+        """
+        Whether there is still a window to update.
+
+        Scheduled work outlives the window: a timer set with after() fires even
+        after destroy(), and the callback then raises inside Tcl. Every periodic
+        job checks this first.
+        """
+        try:
+            return bool(self.winfo_exists())
+        except Exception:
+            return False
+
+    def _save_settings(self):
+        """
+        Persist the choices worth remembering across launches.
+
+        The functions to do this existed but nothing ever called them, so every
+        launch reset the user's channel, provider and profile back to defaults.
+        Only deliberate choices are marked as manual, which is what stops the
+        ISP detector and the speed test from overruling them next time.
+        """
+        try:
+            dns_manager.save_config({
+                "version": 1,
+                "adapter": self.selected_adapter,
+                "channel": self.active_channel,
+                "channel_manual": self._channel_user_chosen,
+                "dns_preset": self.current_preset,
+                "dns_preset_manual": self._preset_user_chosen,
+                "dpi_profile": self.selected_profile,
+                "auto_restore_on_exit": bool(self.auto_restore_on_exit.get()),
+            })
+        except Exception as e:
+            self.log(f"Ayarlar kaydedilemedi: {e}")
+
+    def toggle_autostart(self):
+        """Add or remove the app from Windows startup."""
+        enable = bool(self.autostart_var.get())
+        if dns_manager.set_autostart(enable):
+            self.log("🚀 Windows ile birlikte başlatma açıldı." if enable
+                     else "Windows ile birlikte başlatma kapatıldı.")
+        else:
+            self.log("✗ Başlangıç kaydı değiştirilemedi (yetki gerekebilir).")
+            self.autostart_var.set(dns_manager.is_autostart_enabled())
 
     def _display_scaling(self) -> float:
         """
@@ -1624,6 +1718,8 @@ class DiscordDNSApp(ctk.CTk):
     # ═══════════════════════════════════════════════════════════════════════════════
 
     def refresh_status(self):
+        if not self._alive():
+            return
         self.bar_led.configure(text_color=GOLD)
         self.bar_text.configure(text="Güncelleniyor...")
         threading.Thread(target=self._do_refresh, daemon=True).start()
@@ -1714,10 +1810,14 @@ class DiscordDNSApp(ctk.CTk):
         return "  ·  ".join(parts) if parts else "Motor kapalı"
 
     def _schedule_auto_refresh(self):
+        if not self._alive():
+            return
         self.refresh_status()
         self.after(30_000, self._schedule_auto_refresh)
 
     def _tick_active_timer(self):
+        if not self._alive():
+            return
         is_managed = self.user_dns_enabled and self.dns_state and not self.dns_state.get("is_dhcp")
 
         if is_managed:
@@ -2189,6 +2289,8 @@ class DiscordDNSApp(ctk.CTk):
 
     def on_app_close(self):
         """Full application shutdown — restores DNS, stops the engines, exits."""
+        self._save_settings()
+
         # Stop heartbeat guard
         if self._guard:
             self._guard.stop()

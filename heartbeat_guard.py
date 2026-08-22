@@ -36,8 +36,13 @@ FAILURE_THRESHOLD: int = 2
 # What a check is allowed to take before it counts as a failure
 PROBE_TIMEOUT_S: float = 5.0
 
-# Failover chain: if current preset fails, try the next one in order
-FAILOVER_CHAIN: list[str] = ["Cloudflare", "Google", "Quad9"]
+# Failover chain: if the current preset fails, try the next one in order.
+# It used to list three of the six providers, which meant the app could never
+# fail over to AdGuard — the provider its own benchmark measured as the fastest
+# on the line it was running on. The order is refreshed from that benchmark at
+# runtime via set_chain().
+FAILOVER_CHAIN: list[str] = ["Cloudflare", "Google", "Quad9",
+                             "AdGuard", "OpenDNS", "ControlD"]
 
 
 # ─── HeartbeatGuard Class ─────────────────────────────────────────────────────────
@@ -82,6 +87,7 @@ class HeartbeatGuard:
         self.probe_timeout     = probe_timeout
         self.target_host       = target_host
         self.last_diagnosis    = ""
+        self.chain             = list(FAILOVER_CHAIN)
 
         self._stop_event       = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -115,9 +121,24 @@ class HeartbeatGuard:
 
     def sync_preset(self, preset_name: str):
         """Notify the guard about a manually selected DNS preset so failover chain stays in sync."""
-        if preset_name in FAILOVER_CHAIN:
-            self.current_preset_index = FAILOVER_CHAIN.index(preset_name)
+        if preset_name in self.chain:
+            self.current_preset_index = self.chain.index(preset_name)
             self.consecutive_failures = 0
+
+    def set_chain(self, providers: list) -> None:
+        """
+        Reorder the failover chain, normally from measured latency.
+
+        Falling back to a provider that was measured to be slower than the one
+        that just failed is a poor trade, so the benchmark's ranking decides the
+        order rather than a hard-coded list.
+        """
+        current = self.chain[self.current_preset_index] if self.chain else None
+        chain = [p for p in providers if p in dns_manager.DNS_PRESETS]
+        if not chain:
+            return
+        self.chain = chain
+        self.current_preset_index = chain.index(current) if current in chain else 0
 
     def get_status(self) -> dict:
         """Return current guard state snapshot."""
@@ -125,7 +146,7 @@ class HeartbeatGuard:
             "is_running":           self.is_running,
             "adapter_name":         self.adapter_name,
             "consecutive_failures": self.consecutive_failures,
-            "current_preset":       FAILOVER_CHAIN[self.current_preset_index],
+            "current_preset":       self.chain[self.current_preset_index],
             "interval":             self.interval,
             "active_interval":      self.active_interval,
             "last_diagnosis":       self.last_diagnosis,
@@ -192,7 +213,7 @@ class HeartbeatGuard:
                 "ok":                  True,
                 "ping_ms":             result["ping_ms"],
                 "consecutive_failures": 0,
-                "preset":              FAILOVER_CHAIN[self.current_preset_index],
+                "preset":              self.chain[self.current_preset_index],
                 "diagnosis":           self.last_diagnosis,
             })
             logger.debug("Heartbeat OK — %d ms", result["ping_ms"])
@@ -203,7 +224,7 @@ class HeartbeatGuard:
                 "ok":                  False,
                 "ping_ms":             -1,
                 "consecutive_failures": self.consecutive_failures,
-                "preset":              FAILOVER_CHAIN[self.current_preset_index],
+                "preset":              self.chain[self.current_preset_index],
                 "diagnosis":           self.last_diagnosis,
             })
             logger.warning("Heartbeat FAIL #%d", self.consecutive_failures)
@@ -217,11 +238,11 @@ class HeartbeatGuard:
             logger.info("Heartbeat failover skipped because DNS protection is inactive.")
             return
 
-        from_preset = FAILOVER_CHAIN[self.current_preset_index]
-        next_index  = (self.current_preset_index + 1) % len(FAILOVER_CHAIN)
+        from_preset = self.chain[self.current_preset_index]
+        next_index  = (self.current_preset_index + 1) % len(self.chain)
 
         # Avoid looping back to the same preset if all have been tried
-        if next_index == 0 and self.current_preset_index == len(FAILOVER_CHAIN) - 1:
+        if next_index == 0 and self.current_preset_index == len(self.chain) - 1:
             self.on_status_change("all_failed", {
                 "message": "Tüm DNS profilleri denendi, Discord hâlâ erişilemiyor. İSS engeli olabilir."
             })
@@ -229,7 +250,7 @@ class HeartbeatGuard:
             self.consecutive_failures = 0
             return
 
-        to_preset = FAILOVER_CHAIN[next_index]
+        to_preset = self.chain[next_index]
 
         # When the adapter points at the local DoH resolver, switching presets
         # would replace 127.0.0.1 with a plaintext server and quietly turn the

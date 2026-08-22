@@ -172,7 +172,13 @@ Tek buton, beş durum — ve her ikisi de **doğrulanır**:
 
 Kontrolün kendisi de değişti: eskiden yalnızca TCP bağlantısı kuruluyordu, bu da Türkiye hatlarında **iki yönde birden yanlış** sonuç veriyordu — DNS kaçırılan hatta bağlantı engel sunucusuna oturup "çalışıyor" diyordu, engel sunucusuna erişilemeyen hatta ise uygulamanın kendi şifreli yolu sorunsuz çalışırken "koptu" diyordu. Artık şifreli DNS ile çözülmüş gerçek adrese tam TLS el sıkışması yapılır ve başarısızlığın nedeni (SNI reseti / DNS kaçırma / zaman aşımı) günlüğe yazılır.
 
-**DPI profili seçici:** VPN'lerdeki sunucu listesi gibi; `Otomatik (İSS'ye göre)` bırakabilir ya da dokuz profilden birini elle seçebilirsiniz.
+**DPI profili seçici:** VPN'lerdeki sunucu listesi gibi; `Otomatik (İSS'ye göre)` bırakabilir ya da profillerden birini elle seçebilirsiniz — yalnızca Discord alan adlarına dokunan `Sadece Discord` profili dahil.
+
+**Ayarlarınız hatırlanır.** Seçtiğiniz kanal, DNS sağlayıcısı, DPI profili ve ağ kartı bir sonraki açılışta hazır gelir. Elle yaptığınız seçimler, otomatik tespit ve hız testi tarafından **ezilmez** — uygulama ölçümü bildirir, kararı size bırakır.
+
+**Windows ile başlat.** Tek kutucukla uygulama açılışta otomatik başlatılır (kayıt defteri `Run` anahtarı; istediğinizde aynı kutucukla geri alınır).
+
+**Yedekleme zinciri ölçüme göre sıralanır.** Heartbeat bir sağlayıcıda sorun görürse altı sağlayıcının hepsine geçebilir ve sıra, hız testinin ölçtüğü gecikmeye göre belirlenir — daha yavaş bir sağlayıcıya düşmez. (Önceden zincir üç sağlayıcıyla sınırlıydı ve uygulamanın kendi ölçtüğü en hızlı sağlayıcı bile dışarıda kalabiliyordu.)
 
 ---
 
