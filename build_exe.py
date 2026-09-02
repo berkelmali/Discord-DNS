@@ -6,7 +6,6 @@ Run: python build_exe.py
 
 import PyInstaller.__main__
 import os
-import sys
 
 ICON_PATH = r".\assets\app_icon.ico"
 EXE_NAME = "Discord_DNS_v3"

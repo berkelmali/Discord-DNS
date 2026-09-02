@@ -639,9 +639,36 @@ def test_settings_and_failover():
     check("kısaltılmış zincirde konum korunur veya sıfırlanır",
           0 <= guard.current_preset_index < len(guard.chain))
 
+    import dns_manager as dm
+
+    # Adapter names are attacker-adjacent input: Windows lets people rename a
+    # connection to anything. Interpolating that into a PowerShell string let
+    # PowerShell act on the contents — measured, "Ev $env:USERNAME Ağı" reached
+    # the cmdlet as "Ev berkg Ağı" and the DNS change silently missed.
+    check("tek tırnak kaçışı doğru", dm.ps_quote("O'Brien") == "'O''Brien'",
+          dm.ps_quote("O'Brien"))
+    check("değişken genişletmesi engelleniyor",
+          dm.ps_quote("$env:USERNAME") == "'$env:USERNAME'")
+    for hostile in ("Ev $env:USERNAME Ağı", 'Kablosuz "Ana" Ağ', "Ofis `n Ağı",
+                    "O'Brien Ağı", "Kablosuz Ağ Bağlantısı"):
+        echoed = dm.run_powershell(f"Write-Output {dm.ps_quote(hostile)}")
+        check(f"tırnaklama koruyor: {hostile[:22]}", echoed == hostile,
+              f"got {echoed!r}")
+
+    # PowerShell writes in the console code page; decoding as UTF-8 corrupted
+    # Turkish adapter names, which are the default names on a Turkish Windows.
+    turkish = "Kablosuz Ağ Bağlantısı"
+    check("Türkçe karakterler bozulmadan dönüyor",
+          dm.run_powershell(f"Write-Output {dm.ps_quote(turkish)}") == turkish)
+
+    # netsh arguments go without a shell, so a name with & or a quote stays one
+    # argument instead of becoming shell syntax
+    listing = dm.run_cmd(["netsh", "interface", "show", "interface"])
+    check("netsh kabuksuz çalışıyor", "Interface" in listing or "Arabirim" in listing,
+          listing[:60])
+
     # Autostart. The system state is left alone: creating or deleting a real
     # startup entry from a test run would change the user's machine.
-    import dns_manager as dm
     command = dm._startup_command()
     check("başlangıç komutu tırnaklı ve çalıştırılabilir",
           command.startswith('"') and command.count('"') >= 2, command)

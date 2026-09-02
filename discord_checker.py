@@ -6,9 +6,8 @@ Uses Discord Voice Anycast endpoints & fallback IPs for 100% reliable latency me
 
 import socket
 import time
-import ssl
 import threading
-from typing import Callable, Dict, List, Any
+from typing import Dict, List, Any
 
 # ─── Primary Discord Endpoints ───────────────────────────────────────────────────
 

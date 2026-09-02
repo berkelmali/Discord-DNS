@@ -6,7 +6,6 @@ to the next available preset without interrupting an active Discord voice sessio
 """
 
 import threading
-import time
 import logging
 from typing import Callable, Optional
 

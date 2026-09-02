@@ -261,9 +261,11 @@ netsh interface ipv6 set dns name="Wi-Fi" dhcp
 
 Derlenmiş ve kuruluma ihtiyaç duymayan taşınabilir sürümü kullanmak için:
 
-1. [Releases](../../releases) bölümünden veya `dist/Discord_DNS_v3.exe` dosyasını indirin.
+1. **[Releases](../../releases)** bölümünden en son sürümün `.exe` dosyasını indirin.
 2. Dosyaya sağ tıklayıp **"Yönetici olarak çalıştır"** (Run as Administrator) deyin *(Ağ ayarlarını değiştirmek için Yönetici yetkisi gereklidir)*.
 3. Otomatik tespit edilen kanal ile **`⚡ BAĞLAN`** butonuna basın.
+
+> Executable artık depoda tutulmuyor, sürüm varlığı (release asset) olarak yayımlanıyor: her derleme depoya ~31 MB ekliyordu. Kaynaktan kendiniz derlemek isterseniz `python build_exe.py` yeterli.
 
 ---
 
@@ -294,7 +296,7 @@ Uygulamayı tek bir taşınabilir `.exe` dosyası haline getirmek için:
 ```bash
 python build_exe.py
 ```
-Derlenmiş executable `dist/Discord_DNS_v3.exe` konumunda oluşturulacaktır.
+Derlenmiş executable `dist/Discord_DNS_v3.exe` konumunda oluşturulacaktır (bu klasör sürüm kontrolüne dahil değildir).
 
 ---
 

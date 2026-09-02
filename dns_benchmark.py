@@ -8,7 +8,7 @@ import socket
 import time
 import threading
 import struct
-from typing import Callable, Optional
+from typing import Optional
 
 # ─── DNS Providers to Benchmark ─────────────────────────────────────────────────
 
