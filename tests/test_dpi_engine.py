@@ -677,6 +677,49 @@ def test_settings_and_failover():
     check("başlangıç modu bilinen bir değer",
           dm.autostart_mode() in ("task", "registry", "off"))
 
+    # Corrupt settings must not stop the app from opening. A config.json holding
+    # a JSON list used to crash startup with AttributeError before any window
+    # appeared, and the user had no way to see why.
+    original_appdata2 = os.environ.get("APPDATA")
+    sandbox2 = tempfile.mkdtemp(prefix="ddns_bad_")
+    try:
+        os.environ["APPDATA"] = sandbox2
+        import importlib
+        importlib.reload(dm)
+        bad_path = os.path.join(sandbox2, "DiscordDNS", "config.json")
+        os.makedirs(os.path.dirname(bad_path), exist_ok=True)
+
+        for label, content in (("liste", '["x"]'), ("sayı", "42"),
+                               ("bozuk json", "{ bu json değil")):
+            io_handle = open(bad_path, "w", encoding="utf-8")
+            io_handle.write(content)
+            io_handle.close()
+            check(f"bozuk ayar dosyası ({label}) sözlük döndürüyor",
+                  dm.load_config() == {}, f"got {dm.load_config()!r}")
+
+        open(bad_path, "w", encoding="utf-8").write(
+            '{"channel": 123, "dns_preset": "Quad9", "channel_manual": 1}')
+        loaded_bad = dm.load_config()
+        check("yanlış tipteki alanlar atılıyor", "channel" not in loaded_bad, loaded_bad)
+        check("bool yerine sayı verilen alan atılıyor",
+              "channel_manual" not in loaded_bad, loaded_bad)
+        check("doğru tipteki alan korunuyor", loaded_bad.get("dns_preset") == "Quad9")
+    finally:
+        if original_appdata2 is not None:
+            os.environ["APPDATA"] = original_appdata2
+        import importlib
+        importlib.reload(dm)
+        import shutil as _shutil
+        _shutil.rmtree(sandbox2, ignore_errors=True)
+
+    # Only real hostnames belong in the domain list
+    check("ikili çöp alan adı sayılmıyor", not dpi_engine._is_hostname("�\x00garbage"))
+    check("aşırı uzun ad reddediliyor", not dpi_engine._is_hostname("a" * 254 + ".com"))
+    check("çift nokta reddediliyor", not dpi_engine._is_hostname("bozuk..com"))
+    check("tire ile başlayan etiket reddediliyor", not dpi_engine._is_hostname("-kotu.com"))
+    check("geçerli alan adı kabul ediliyor", dpi_engine._is_hostname("gateway.discord.gg"))
+    check("tek etiketli ad kabul ediliyor", dpi_engine._is_hostname("localhost"))
+
     # A domain list restricts the engine; an empty one must not
     import tempfile as tf
     handle = tf.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
