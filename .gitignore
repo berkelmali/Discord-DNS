@@ -5,6 +5,9 @@ __pycache__/
 
 # PyInstaller & Build artifacts
 build/
+# The executable ships as a GitHub Release asset, not in the tree:
+# every rebuild added ~31 MB to the repository
+dist/
 *.spec
 !Discord_DNS_v3.spec
 

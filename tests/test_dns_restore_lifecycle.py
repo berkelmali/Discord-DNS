@@ -1,5 +1,5 @@
 """
-Discord DNS v3.5 — Contributor Test Suite: DNS Backup & Restore Lifecycle Tester
+Discord DNS v3.6 — Contributor Test Suite: DNS Backup & Restore Lifecycle Tester
 Verifies that original DNS backup is saved correctly and restored 100% on app close/restore.
 Run: python tests/test_dns_restore_lifecycle.py
 """

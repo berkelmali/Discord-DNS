@@ -1,5 +1,5 @@
 """
-Discord DNS v3.5 — Contributor Diagnostic Suite: Connection Tester
+Discord DNS v3.6 — Contributor Diagnostic Suite: Connection Tester
 Run: python -m tests.test_connection (or python tests/test_connection.py)
 """
 
@@ -17,7 +17,7 @@ import admin_utils
 
 def run_tests():
     print("=" * 60)
-    print("  DISCORD DNS v3.5 -- SYSTEM & CONNECTION DIAGNOSTIC TESTER")
+    print("  DISCORD DNS v3.6 -- SYSTEM & CONNECTION DIAGNOSTIC TESTER")
     print("=" * 60)
 
     # Test 1: Admin privileges

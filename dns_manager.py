@@ -7,7 +7,6 @@ All subprocess calls use CREATE_NO_WINDOW to prevent console flicker.
 
 import subprocess
 import json
-import re
 import os
 import sys
 
@@ -60,11 +59,21 @@ BACKUP_FILE = _get_backup_path()
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
+# Windows PowerShell writes in the console's OEM code page, not UTF-8. Decoding
+# its output as UTF-8 mangles any non-ASCII text: measured here, an adapter named
+# "Kablosuz Ağ Bağlantısı" came back as "Kablosuz A� Ba�lant�s�". The app would
+# then hand that corrupted name straight back to the next command, so on a
+# Turkish Windows — where adapters carry exactly those names by default — every
+# DNS change would quietly target an adapter that does not exist. Forcing the
+# output encoding keeps the round trip intact regardless of the system locale.
+_PS_UTF8 = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+
+
 def run_powershell(cmd: str) -> str:
     """Execute a PowerShell command silently. Returns stdout string."""
     try:
         completed = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _PS_UTF8 + cmd],
             capture_output=True,
             check=True,
             creationflags=CREATE_NO_WINDOW
@@ -77,18 +86,40 @@ def run_powershell(cmd: str) -> str:
     except Exception as e:
         return f"ERROR: {str(e)}"
 
-def run_cmd(cmd: str) -> str:
-    """Execute a shell command silently. Returns stdout string."""
+def run_cmd(cmd) -> str:
+    """
+    Execute a command silently. Returns stdout string.
+
+    A list is run directly, without a shell, so an adapter name containing a
+    quote or an ampersand is passed as one argument instead of being parsed as
+    shell syntax. Strings still go through the shell for the few callers that
+    need pipes.
+    """
     try:
         completed = subprocess.run(
             cmd,
             capture_output=True,
-            shell=True,
+            shell=isinstance(cmd, str),
             creationflags=CREATE_NO_WINDOW
         )
         return completed.stdout.decode("utf-8", errors="replace").strip()
     except Exception as e:
         return f"ERROR: {str(e)}"
+
+
+def ps_quote(value: str) -> str:
+    """
+    Quote a value for PowerShell so its contents are never interpreted.
+
+    Interpolating an adapter name into a double-quoted PowerShell string lets
+    PowerShell act on what is inside it: a name containing $env:USERNAME gets
+    expanded, a backtick becomes an escape, and a double quote ends the string
+    early. Measured on this machine, an adapter named `Ev $env:USERNAME Ağı`
+    reached the cmdlet as `Ev berkg Ağı`, so the DNS change silently targeted an
+    adapter that does not exist. Single quotes take the text literally; the only
+    character needing care inside them is the single quote itself.
+    """
+    return "'" + str(value).replace("'", "''") + "'"
 
 # ─── Adapter Discovery ───────────────────────────────────────────────────────────
 
@@ -148,19 +179,19 @@ def get_current_dns(adapter_name: str) -> dict:
     }
 
     # IPv4
-    ps_v4 = f'(Get-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -AddressFamily IPv4).ServerAddresses'
+    ps_v4 = f"(Get-DnsClientServerAddress -InterfaceAlias {ps_quote(adapter_name)} -AddressFamily IPv4).ServerAddresses"
     out_v4 = run_powershell(ps_v4)
     if out_v4 and not out_v4.startswith("ERROR"):
         res["ipv4"] = [a.strip() for a in out_v4.splitlines() if a.strip()]
 
     # IPv6
-    ps_v6 = f'(Get-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -AddressFamily IPv6).ServerAddresses'
+    ps_v6 = f"(Get-DnsClientServerAddress -InterfaceAlias {ps_quote(adapter_name)} -AddressFamily IPv6).ServerAddresses"
     out_v6 = run_powershell(ps_v6)
     if out_v6 and not out_v6.startswith("ERROR"):
         res["ipv6"] = [a.strip() for a in out_v6.splitlines() if a.strip()]
 
     # Check DoH status
-    ps_doh = f'(Get-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -AddressFamily IPv4).DnsOverHttps'
+    ps_doh = f"(Get-DnsClientServerAddress -InterfaceAlias {ps_quote(adapter_name)} -AddressFamily IPv4).DnsOverHttps"
     out_doh = run_powershell(ps_doh)
     if "Allow" in out_doh or "Require" in out_doh:
         res["doh_enabled"] = True
@@ -280,12 +311,12 @@ def set_custom_dns(
     v4_servers = [s for s in [ipv4_primary, ipv4_secondary] if s]
     if v4_servers:
         v4_str = ",".join([f'"{s}"' for s in v4_servers])
-        ps_v4 = f'Set-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -ServerAddresses ({v4_str})'
+        ps_v4 = f"Set-DnsClientServerAddress -InterfaceAlias {ps_quote(adapter_name)} -ServerAddresses ({v4_str})"
         out_v4 = run_powershell(ps_v4)
         if out_v4.startswith("ERROR"):
-            run_cmd(f'netsh interface ipv4 set dns name="{adapter_name}" static {ipv4_primary}')
+            run_cmd(["netsh","interface","ipv4","set","dns","name=" + adapter_name,"static",ipv4_primary])
             if ipv4_secondary:
-                run_cmd(f'netsh interface ipv4 add dns name="{adapter_name}" {ipv4_secondary} index=2')
+                run_cmd(["netsh","interface","ipv4","add","dns","name=" + adapter_name,ipv4_secondary,"index=" + str(2)])
             logs.append(f"IPv4 DNS (netsh): {', '.join(v4_servers)}")
         else:
             logs.append(f"IPv4 DNS: {', '.join(v4_servers)}")
@@ -294,12 +325,12 @@ def set_custom_dns(
     v6_servers = [s for s in [ipv6_primary, ipv6_secondary] if s]
     if v6_servers:
         v6_str = ",".join([f'"{s}"' for s in v6_servers])
-        ps_v6 = f'Set-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -ServerAddresses ({v6_str})'
+        ps_v6 = f"Set-DnsClientServerAddress -InterfaceAlias {ps_quote(adapter_name)} -ServerAddresses ({v6_str})"
         out_v6 = run_powershell(ps_v6)
         if out_v6.startswith("ERROR"):
-            run_cmd(f'netsh interface ipv6 set dns name="{adapter_name}" static {ipv6_primary}')
+            run_cmd(["netsh","interface","ipv6","set","dns","name=" + adapter_name,"static",ipv6_primary])
             if ipv6_secondary:
-                run_cmd(f'netsh interface ipv6 add dns name="{adapter_name}" {ipv6_secondary} index=2')
+                run_cmd(["netsh","interface","ipv6","add","dns","name=" + adapter_name,ipv6_secondary,"index=" + str(2)])
             logs.append(f"IPv6 DNS (netsh): {', '.join(v6_servers)}")
         else:
             logs.append(f"IPv6 DNS: {', '.join(v6_servers)}")
@@ -349,24 +380,24 @@ def set_local_resolver_dns(adapter_name: str, safety_net: bool = True) -> tuple[
 
     v4_str = ",".join(f'"{s}"' for s in v4)
     out_v4 = run_powershell(
-        f'Set-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -ServerAddresses ({v4_str})'
+        f"Set-DnsClientServerAddress -InterfaceAlias {ps_quote(adapter_name)} -ServerAddresses ({v4_str})"
     )
     if out_v4.startswith("ERROR"):
-        run_cmd(f'netsh interface ipv4 set dns name="{adapter_name}" static {v4[0]}')
+        run_cmd(["netsh","interface","ipv4","set","dns","name=" + adapter_name,"static",v4[0]])
         for index, extra in enumerate(v4[1:], start=2):
-            run_cmd(f'netsh interface ipv4 add dns name="{adapter_name}" {extra} index={index}')
+            run_cmd(["netsh","interface","ipv4","add","dns","name=" + adapter_name,extra,"index=" + str(index)])
         logs.append(f"IPv4 DNS (netsh) → {', '.join(v4)}")
     else:
         logs.append(f"IPv4 DNS → {', '.join(v4)} (yerel DoH)")
 
     both_str = ",".join(f'"{s}"' for s in v4 + v6)
     out_v6 = run_powershell(
-        f'Set-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -ServerAddresses ({both_str})'
+        f"Set-DnsClientServerAddress -InterfaceAlias {ps_quote(adapter_name)} -ServerAddresses ({both_str})"
     )
     if out_v6.startswith("ERROR"):
-        run_cmd(f'netsh interface ipv6 set dns name="{adapter_name}" static {v6[0]}')
+        run_cmd(["netsh","interface","ipv6","set","dns","name=" + adapter_name,"static",v6[0]])
         for index, extra in enumerate(v6[1:], start=2):
-            run_cmd(f'netsh interface ipv6 add dns name="{adapter_name}" {extra} index={index}')
+            run_cmd(["netsh","interface","ipv6","add","dns","name=" + adapter_name,extra,"index=" + str(index)])
         logs.append(f"IPv6 DNS (netsh) → {', '.join(v6)}")
     else:
         logs.append(f"IPv6 DNS → {', '.join(v6)}")
@@ -380,12 +411,12 @@ def set_local_resolver_dns(adapter_name: str, safety_net: bool = True) -> tuple[
 def reset_dns_to_dhcp(adapter_name: str) -> tuple[bool, str]:
     """Reset DNS to Automatic (DHCP) on the given adapter."""
     logs = []
-    ps_cmd = f'Set-DnsClientServerAddress -InterfaceAlias "{adapter_name}" -ResetServerAddresses'
+    ps_cmd = f"Set-DnsClientServerAddress -InterfaceAlias {ps_quote(adapter_name)} -ResetServerAddresses"
     out = run_powershell(ps_cmd)
 
     if out.startswith("ERROR"):
-        run_cmd(f'netsh interface ipv4 set dns name="{adapter_name}" dhcp')
-        run_cmd(f'netsh interface ipv6 set dns name="{adapter_name}" dhcp')
+        run_cmd(["netsh","interface","ipv4","set","dns","name=" + adapter_name,"dhcp"])
+        run_cmd(["netsh","interface","ipv6","set","dns","name=" + adapter_name,"dhcp"])
         logs.append(f"{adapter_name} DNS → Otomatik (DHCP) [netsh]")
     else:
         logs.append(f"{adapter_name} DNS → Otomatik (DHCP)")

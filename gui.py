@@ -30,7 +30,7 @@ PNG_PATH   = os.path.join(ASSETS_DIR, "app_icon.png")
 try:
     import pystray
     from pystray import MenuItem as TrayItem
-    from PIL import Image, ImageDraw, ImageTk
+    from PIL import Image, ImageDraw
     HAS_TRAY = True
 except ImportError:
     HAS_TRAY = False
