@@ -2092,10 +2092,53 @@ class DiscordDNSApp(ctk.CTk):
         self.log_box.configure(state="disabled")
 
     def elevate_admin(self):
-        self.log("Yönetici izni talep ediliyor...")
-        if not admin_utils.run_as_admin():
+        """
+        Hand the session over to an elevated copy and get out of the way.
+
+        The old process used to stay behind: sys.exit inside a Tk callback only
+        raises SystemExit, which Tk swallows, so the unelevated window kept
+        sitting there next to the new one. Nothing here needs cleaning up — an
+        unelevated instance never changed a system setting — so once the
+        elevated copy is on its way, this one closes itself for real.
+        """
+        self.log("Yönetici izni talep ediliyor…")
+
+        # Let go of the single-instance lock first: the elevated copy claims it
+        # on startup, and holding on here would make it wait — or give up.
+        admin_utils.release_single_instance()
+
+        if not admin_utils.relaunch_as_admin():
+            admin_utils.claim_single_instance(wait_seconds=0)   # nobody took over
             messagebox.showerror("Yönetici Gerekli",
                                   "DNS değiştirmek için Yönetici olarak çalıştırın.")
+            return
+
+        self.log("✓ Yönetici kopyası başlatıldı, bu pencere kapanıyor…")
+        self._handover_exit()
+
+    def _handover_exit(self):
+        """Close this instance completely, leaving nothing running behind."""
+        self._cleanup_done = True          # an unelevated copy has nothing to undo
+
+        if self._guard:
+            try:
+                self._guard.stop()
+            except Exception:
+                pass
+        if self._tray_icon:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+        # Background threads and Tk timers would otherwise keep the interpreter
+        # alive after the window is gone, which is exactly the leftover process
+        # this is meant to prevent.
+        os._exit(0)
 
     # ═══════════════════════════════════════════════════════════════════════════════
     #  DIAGNOSTICS & AUTOMATIC STRATEGY

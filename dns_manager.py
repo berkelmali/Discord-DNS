@@ -453,16 +453,58 @@ def save_config(config_dict: dict) -> bool:
     except Exception:
         return False
 
+# What a settings file is allowed to contain. Anything else is dropped rather
+# than handed to the interface: a config.json holding a JSON list crashed the app
+# before a window ever appeared, with no message and no way for the user to guess
+# why. The file is normally written by the app, but a half-written file after a
+# power cut or a hand edit is enough to produce one.
+_CONFIG_SCHEMA = {
+    "version": int,
+    "adapter": str,
+    "channel": str,
+    "channel_manual": bool,
+    "dns_preset": str,
+    "dns_preset_manual": bool,
+    "dpi_profile": str,
+    "auto_restore_on_exit": bool,
+    "auto_connect_on_start": bool,
+}
+
+
 def load_config() -> dict:
-    """Load user application preferences from config.json."""
+    """
+    Load user preferences, keeping only entries that are the expected shape.
+
+    Returns a plain dict in every failure case, so callers can treat the result
+    as settings without checking what came back off the disk.
+    """
     try:
         cfg_path = os.path.join(_get_backup_dir(), "config.json")
-        if os.path.exists(cfg_path):
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+        if not os.path.exists(cfg_path):
+            return {}
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
     except Exception:
-        pass
-    return {}
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    clean = {}
+    for key, expected in _CONFIG_SCHEMA.items():
+        if key not in data:
+            continue
+        value = data[key]
+        if value is None:
+            continue
+        # bool is a subclass of int, so check it first to keep the two apart
+        if expected is bool and isinstance(value, bool):
+            clean[key] = value
+        elif expected is int and isinstance(value, int) and not isinstance(value, bool):
+            clean[key] = value
+        elif expected is str and isinstance(value, str):
+            clean[key] = value
+    return clean
 
 REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 APP_REG_KEY = "DiscordDNS"

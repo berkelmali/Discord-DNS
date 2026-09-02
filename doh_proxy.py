@@ -271,15 +271,40 @@ class LocalDohProxy:
         return True, (f"🔒 Yerel DoH çözümleyici aktif — {self.listen_addr}:{self.port} "
                       f"({families}) → {self.upstreams[0]}")
 
+    @staticmethod
+    def _claim_port(sock: socket.socket) -> None:
+        """
+        Take the port exclusively.
+
+        SO_REUSEADDR does not mean on Windows what it means elsewhere: it lets
+        another process bind the same address and port and start receiving the
+        traffic. For a resolver every lookup on the machine is sent to, that is
+        not a small thing — a second copy of this app, or any other local
+        program, could quietly take over DNS. SO_EXCLUSIVEADDRUSE makes the bind
+        fail instead, which is the answer we want: a clear error rather than a
+        silent split.
+        """
+        option = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if option is not None:
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, option, 1)
+                return
+            except OSError:
+                pass
+
     def _bind_family(self, family: int, address: str) -> None:
         udp = socket.socket(family, socket.SOCK_DGRAM)
-        udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        udp.bind((address, self.port))
+        self._claim_port(udp)
+        try:
+            udp.bind((address, self.port))
+        except OSError:
+            udp.close()
+            raise
         udp.settimeout(0.5)
         self._udp_socks.append(udp)
 
         tcp = socket.socket(family, socket.SOCK_STREAM)
-        tcp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._claim_port(tcp)
         try:
             tcp.bind((address, self.port))
             tcp.listen(32)

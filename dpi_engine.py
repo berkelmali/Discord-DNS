@@ -200,6 +200,27 @@ AGGRESSION_LADDER: Tuple[str, ...] = (
 )
 
 
+_HOSTNAME_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789-._")
+
+
+def _is_hostname(entry: str) -> bool:
+    """
+    Whether a line from the domain list is actually a hostname.
+
+    Without this, a file that picked up binary junk or a stray line turned into
+    a "domain" the engine would then try to match — silently narrowing what it
+    protects. A name has a length limit, a character set, and labels that do not
+    start or end with a hyphen.
+    """
+    if not entry or len(entry) > 253 or ".." in entry:
+        return False
+    if not set(entry) <= _HOSTNAME_CHARS:
+        return False
+    labels = entry.split(".")
+    return all(0 < len(label) <= 63 and not label.startswith("-")
+               and not label.endswith("-") for label in labels)
+
+
 def load_hostname_list(path: Optional[str] = None) -> Tuple[str, ...]:
     """
     Read a domain list (GoodbyeDPI's --blacklist) from
@@ -219,7 +240,7 @@ def load_hostname_list(path: Optional[str] = None) -> Tuple[str, ...]:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 entry = line.split("#", 1)[0].strip().lower().lstrip(".")
-                if entry:
+                if _is_hostname(entry):
                     domains.append(entry)
         return tuple(dict.fromkeys(domains))
     except Exception as e:
