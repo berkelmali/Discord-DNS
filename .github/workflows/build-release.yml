@@ -1,0 +1,53 @@
+name: Build & Release EXE
+
+on:
+  push:
+    tags:
+      - "v*"          # Runs on any tag starting with 'v' (e.g. v3.6.0)
+
+permissions:
+  contents: write    # Needed to create releases & upload assets
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build EXE with PyInstaller
+        run: python build_exe.py
+
+      - name: Show output
+        run: |
+          Get-ChildItem dist/ -Recurse
+          (Get-Item dist/Discord_DNS_v3.exe).Length / 1MB
+
+      - name: Create GitHub Release & upload EXE
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Discord DNS ${{ github.ref_name }}"
+          body: |
+            ## Discord DNS ${{ github.ref_name }}
+
+            ### 📥 Kurulum
+            1. Aşağıdaki **Discord_DNS_v3.exe** dosyasını indirin
+            2. Çift tıklayarak çalıştırın (Yönetici izni isteyecektir)
+            3. Başka hiçbir kurulum gerekmez!
+
+            ### ⚠️ Notlar
+            - Windows Defender veya antivirüs yazılımı uyarı verebilir — bu PyInstaller kaynaklıdır, güvenle izin verebilirsiniz
+            - Uygulama yönetici yetkisi gerektirir (DNS ayarları ve DPI bypass için)
+          files: dist/Discord_DNS_v3.exe
+          draft: false
+          prerelease: false
+          generate_release_notes: true
