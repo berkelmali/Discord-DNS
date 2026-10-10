@@ -178,7 +178,7 @@ class DiscordDNSApp(ctk.CTk):
 
         # Ensure app starts with normal DNS (DHCP) on launch until user presses button
         if self.is_admin_user:
-            dns_manager.restore_original_dns(self.selected_adapter)
+            dns_manager.reset_dns_to_dhcp(self.selected_adapter)
 
         # Heartbeat
         self._guard               = None
@@ -1715,7 +1715,7 @@ class DiscordDNSApp(ctk.CTk):
             self.log("⚠ Kapatma eksik kaldı: " + ", ".join(problems))
             self._set_connection_state("error")
         else:
-            self.log(f"🔌 Bağlantı kesildi. DNS geri yüklendi → {restored}")
+            self.log(f"🔌 Bağlantı kesildi. DNS otomatik (DHCP) moduna döndürüldü.")
             self._set_connection_state("disconnected")
         self.user_dns_enabled = False
         self.dns_active_start_time = None
@@ -2422,26 +2422,37 @@ class DiscordDNSApp(ctk.CTk):
 
     def _restore_original_dns(self) -> str:
         """
-        Hand DNS back exactly as we found it — the user's own servers, not DHCP.
+        Reset DNS to automatic (DHCP) mode on disconnect.
 
-        The backup written when protection was switched on knows which adapter it
-        came from and whether that adapter was on DHCP, so restoring it returns
-        the machine to its real previous state. Anything still pointing at our
-        local resolver afterwards was ours too, and goes back to automatic.
+        Always returns the adapter to DHCP so the system never stays stuck on a
+        manual DNS configuration after the app stops managing it.  A stale manual
+        entry (e.g. 127.0.0.1 from the local resolver, or a preset DNS) would
+        leave the machine with no working DNS the next time it boots — resetting
+        to DHCP is the only safe default.
         """
         messages = []
 
-        if os.path.exists(dns_manager.BACKUP_FILE):
-            ok, message = dns_manager.restore_original_dns()
-            messages.append(message)
+        # Clean up the backup file if it exists — we are going to DHCP anyway
+        try:
+            if os.path.exists(dns_manager.BACKUP_FILE):
+                os.remove(dns_manager.BACKUP_FILE)
+        except Exception:
+            pass
 
+        # Reset the selected adapter to DHCP (automatic)
+        ok, message = dns_manager.reset_dns_to_dhcp(self.selected_adapter)
+        messages.append(message)
+
+        # Also reset any other adapter that still points at our local resolver
         for adapter in (self.adapters or ["Wi-Fi", "Ethernet"]):
+            if adapter == self.selected_adapter:
+                continue
             state = dns_manager.get_current_dns(adapter)
-            if state.get("is_local_doh"):
-                _, message = dns_manager.reset_dns_to_dhcp(adapter)
-                messages.append(message)
+            if state.get("is_local_doh") or not state.get("is_dhcp"):
+                _, msg = dns_manager.reset_dns_to_dhcp(adapter)
+                messages.append(msg)
 
-        return "\n".join(messages) or "DNS zaten orijinal durumdaydı."
+        return "\n".join(messages) or "DNS otomatik (DHCP) moduna döndürüldü."
 
     def _watchdog_check(self, dns_state):
         """
