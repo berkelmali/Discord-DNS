@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — Heartbeat Guard (Smart Failover)
+Discord DNS v3.7 — Heartbeat Guard (Smart Failover)
 Background daemon thread that monitors Discord connectivity every N seconds.
 If consecutive failures exceed the threshold, it triggers an automatic DNS failover
 to the next available preset without interrupting an active Discord voice session.

@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — Self-Diagnostics
+Discord DNS v3.7 — Self-Diagnostics
 Builds a single, shareable report answering "is this actually working on my
 machine, and if not, why?".
 
@@ -320,7 +320,8 @@ def collect_report(on_progress: Optional[Callable[[str], None]] = None,
         lines.append(title)
         lines.append("─" * len(title))
 
-    lines.append("DISCORD DNS v3.6 — TANILAMA RAPORU")
+    import version
+    lines.append(f"{version.APP_TITLE.upper()} — TANILAMA RAPORU")
     lines.append("=" * 42)
     lines.append(f"Tarih      : {time.strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"Sistem     : {platform.system()} {platform.release()} ({platform.machine()})")
@@ -343,7 +344,11 @@ def collect_report(on_progress: Optional[Callable[[str], None]] = None,
                      f"yeniden yazılan {stats.get('packets_rewritten')}, "
                      f"parça {stats.get('segments_sent')}, sahte {stats.get('decoys_sent')}")
         lines.append(f"Ek koruma   : engellenen RST {stats.get('rst_blocked', 0)}, "
-                     f"öğrenilen mesafe {stats.get('hops_learned', 0)}")
+                     f"öğrenilen mesafe {stats.get('hops_learned', 0)}, "
+                     f"sıra örtüşmesi {stats.get('seqovl_sent', 0)}")
+        if stats.get("udp_flows") or stats.get("udp_decoys_sent"):
+            lines.append(f"Ses (UDP)   : {stats.get('udp_flows', 0)} akış, "
+                         f"{stats.get('udp_decoys_sent', 0)} sahte paket")
         lines.append(f"Hata        : {stats.get('errors')}")
     lines.append(f"DoH         : {'çalışıyor' if doh_proxy.is_running() else 'kapalı'}")
     if doh_proxy.is_running():
@@ -360,6 +365,20 @@ def collect_report(on_progress: Optional[Callable[[str], None]] = None,
     lines.append(f"Öneri       : {isp.get('recommended_channel')}")
     hijacked, verdict = check_dns_hijack()
     lines.append(f"DNS testi   : {verdict}")
+
+    say("DNS sızıntısı ve tarayıcılar kontrol ediliyor…")
+    try:
+        import leak_test
+        doh_up = doh_proxy.stats().get("active_upstream", "") if doh_proxy.is_running() else ""
+        adapters = dns_manager.get_network_adapters()
+        state = dns_manager.get_current_dns(adapters[0]) if adapters else {}
+        expected = leak_test.expected_operator(
+            doh_proxy.is_running(), doh_up, state.get("preset_name", ""),
+            state.get("is_dhcp", True), state.get("ipv4") or [])
+        lines.extend(leak_test.report_lines(leak_test.run_leak_test(expected),
+                                            leak_test.check_browsers()))
+    except Exception as e:
+        lines.append(f"Sızıntı     : test yapılamadı ({e})")
 
     section("4. Gerçek bağlantı testi")
     for host in hosts:

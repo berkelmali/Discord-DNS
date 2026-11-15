@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — DNS Manager
+Discord DNS v3.7 — DNS Manager
 Handles DNS read/write via PowerShell (primary) with netsh fallback.
 Includes DoH (DNS-over-HTTPS) encryption, socket optimization, and multi-preset management.
 All subprocess calls use CREATE_NO_WINDOW to prevent console flicker.
@@ -7,6 +7,7 @@ All subprocess calls use CREATE_NO_WINDOW to prevent console flicker.
 
 import subprocess
 import json
+import re
 import os
 import sys
 
@@ -123,11 +124,64 @@ def ps_quote(value: str) -> str:
 
 # ─── Adapter Discovery ───────────────────────────────────────────────────────────
 
+# Adapters that are "Up" but never carry the user's internet traffic. Windows
+# lists the Wi-Fi Direct virtual adapter as connected whenever Wi-Fi is on, and
+# its name ("Local Area Connection* 10") sorts first on many machines — the
+# autopilot then moved DNS management onto it and left the real card untouched.
+_NEVER_INTERNET = re.compile(
+    r"wi-?fi direct|bluetooth|kernel debug|loopback|teredo|isatap|6to4",
+    re.IGNORECASE,
+)
+
+
+def order_adapters(items: list) -> list[str]:
+    """
+    Real internet adapters first, best route first; adapters without a default
+    route after them; adapters that never carry internet traffic dropped.
+
+    `items` are dicts with Name, Desc, HasRoute and Metric, as produced by the
+    PowerShell query in get_network_adapters().
+    """
+    usable = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("Name")
+        if not isinstance(name, str) or not name:
+            continue
+        if _NEVER_INTERNET.search(f"{item.get('Desc') or ''} {name}"):
+            continue
+        has_route = bool(item.get("HasRoute"))
+        try:
+            metric = int(item.get("Metric") if item.get("Metric") is not None else 99999)
+        except (TypeError, ValueError):
+            metric = 99999
+        usable.append((0 if has_route else 1, metric, name))
+    usable.sort()
+    return [name for _, _, name in usable]
+
+
 def get_network_adapters() -> list[str]:
-    """Return list of active network adapter names."""
+    """
+    Active network adapters, the one actually carrying internet traffic first.
+
+    Index 0 is what the interface selects and what the adapter autopilot
+    follows, so the order matters: it is decided by the default route and its
+    metric, the same way Windows itself picks the outgoing interface.
+    """
     ps_cmd = (
-        "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | "
-        "Select-Object Name, InterfaceDescription, Status | ConvertTo-Json"
+        "$routes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0','::/0' -ErrorAction SilentlyContinue); "
+        "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | ForEach-Object { "
+        "$a = $_; "
+        "$r = @($routes | Where-Object { $_.ifIndex -eq $a.ifIndex }); "
+        "$m = 99999; "
+        "if ($r.Count -gt 0) { "
+        "$ip = Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue; "
+        "$im = 0; if ($ip) { $im = [int]$ip.InterfaceMetric }; "
+        "$m = [int](($r | Measure-Object RouteMetric -Minimum).Minimum) + $im }; "
+        "[pscustomobject]@{ Name = $a.Name; Desc = $a.InterfaceDescription; "
+        "HasRoute = ($r.Count -gt 0); Metric = $m } "
+        "} | ConvertTo-Json"
     )
     output = run_powershell(ps_cmd)
     adapters = []
@@ -137,10 +191,7 @@ def get_network_adapters() -> list[str]:
             data = json.loads(output)
             if isinstance(data, dict):
                 data = [data]
-            for item in data:
-                name = item.get("Name")
-                if name:
-                    adapters.append(name)
+            adapters = order_adapters(data)
         except Exception:
             pass
 
@@ -468,6 +519,9 @@ _CONFIG_SCHEMA = {
     "dpi_profile": str,
     "auto_restore_on_exit": bool,
     "auto_connect_on_start": bool,
+    "dpi_profile_manual": bool,
+    "udp_voice": bool,
+    "check_updates": bool,
 }
 
 

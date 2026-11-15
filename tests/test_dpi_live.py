@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — Live Engine Diagnostic (REQUIRES ADMINISTRATOR)
+Discord DNS v3.7 — Live Engine Diagnostic (REQUIRES ADMINISTRATOR)
 Starts the native DPI engine and the local DoH resolver against real traffic,
 proves they actually rewrite packets / answer queries, then shuts everything
 down and verifies nothing is left behind.
@@ -52,7 +52,7 @@ def section(title: str) -> None:
 
 def main() -> int:
     print("=" * 64)
-    print("  DISCORD DNS v3.6 -- LIVE ENGINE DIAGNOSTIC")
+    print("  DISCORD DNS v3.7 -- LIVE ENGINE DIAGNOSTIC")
     print("=" * 64)
 
     failures = 0
