@@ -1,6 +1,6 @@
 <div align="center">
 
-# ⚡ Discord DNS v3.6 — Smart ISP & DPI Bypass Suite
+# ⚡ Discord DNS v3.7 — Smart ISP & DPI Bypass Suite
 
 **Türkiye İSS Engellerini (Superonline, Türk Telekom, Vodafone, TürkNet) ve Discord Erişim Kısıtlamalarını Aşmak İçin Geliştirilmiş Akıllı Arayüz & Tünelleme Yazılımı**
 
@@ -16,7 +16,7 @@
 
 ## 📌 Hakkında
 
-**Discord DNS v3.6**, Türkiye'deki internet servis sağlayıcılarının (İSS) Discord ve benzeri platformlara uyguladığı **DNS Hijacking**, **SNI Blocking** ve **DPI (Derin Paket İnceleme)** engellerini tek tıkla aşmak için tasarlanmış gelişmiş bir açık kaynaklı Windows uygulamasıdır.
+**Discord DNS v3.7**, Türkiye'deki internet servis sağlayıcılarının (İSS) Discord ve benzeri platformlara uyguladığı **DNS Hijacking**, **SNI Blocking** ve **DPI (Derin Paket İnceleme)** engellerini tek tıkla aşmak için tasarlanmış gelişmiş bir açık kaynaklı Windows uygulamasıdır.
 
 Uygulama; **TürkNet** kullanıcılarından **Superonline Fiber** ve **Türk Telekom** altyapısındaki ağır engellemelere kadar tüm senaryolarda bağlantınızı otomatik tespit eder ve en uygun bypass kanalını sunar.
 
@@ -35,11 +35,11 @@ Uygulama; **TürkNet** kullanıcılarından **Superonline Fiber** ve **Türk Tel
 - ⚡ **Kanal 3: Superonline & Türk Telekom DPI Bypass**: **Uygulamanın kendi paket motoru** (WinDivert 2.2 sürücüsü üzerinde, harici `goodbyedpi.exe` süreci olmadan) TLS ClientHello paketini SNI alan adının ortasından böler, sahte paket enjekte eder ve segmentleri ters sırayla göndererek SNI engellerini aşar.
 
 ### ⏱ 3. Dijital Kronometre & Manuel Kontrol
-- Uygulama ilk açıldığında ağ kartınıza hiç dokunmaz; siz **`⚡ BAĞLAN`** butonuna basmadan hiçbir işlem yapmaz.
+- Uygulama açıldığında ağ kartını otomatik (DHCP) DNS moduna alır; siz **`⚡ BAĞLAN`** butonuna basmadan hiçbir DNS sunucusu, motor veya çözümleyici devreye girmez.
 - Kronometre sayacı sadece koruma butonla açıldığında saymaya başlar; kapatıldığında `00:00:00 PASİF — DNS KAPALI` moduna döner.
 
 ### 🛡 4. Otomatik Kapanış Restorasyonu (Safe Clean Shutdown)
-- Koruma kapatıldığında veya uygulamadan çıkıldığında DNS ayarlarınız **kendi orijinal sunucularınıza** geri döner (DHCP'ye değil) — koruma açılırken alınan yedek, hangi ağ kartında hangi adreslerin olduğunu bilir.
+- Koruma kapatıldığında veya uygulamadan çıkıldığında ağ kartı **otomatik (DHCP) DNS moduna** döner; yani modeminizin / İSS'nizin verdiği DNS kullanılır. Elle yazılmış eski bir adreste (örneğin kapanmış yerel çözümleyicinin `127.0.0.1`'inde) takılı kalınmaz.
 - Pencerenin **X** düğmesi uygulamayı kapatmaz, sistem tepsisine küçültür; tamamen çıkmak için tepsi menüsünden **Çıkış**'ı seçin. Koruma açıkken küçülttüğünüzde uygulama bunu bildirimle hatırlatır.
 - Yerel DPI motoru ve DoH çözümleyici durdurulur; WinDivert sürücüsü son tanıtıcı kapandığında kendini sistemden kaldırır.
 
@@ -62,6 +62,38 @@ Uygulama; **TürkNet** kullanıcılarından **Superonline Fiber** ve **Türk Tel
 ### 🛡 9. Otomatik TTL & RST Koruması
 - Gelen SYN-ACK paketinin TTL'inden sunucunun kaç sekme uzakta olduğu öğrenilir; sahte paket **İSS'nin DPI kutusunu geçip sunucuya varmadan** ölecek şekilde ayarlanır.
 - DPI'ın bağlantıyı öldürmek için ürettiği sahte RST paketleri düşürülür — yalnızca motorun dokunduğu akışlar için ve yalnızca birkaç saniyelik pencerede, böylece sunucunun gerçek RST'si engellenmez.
+
+---
+
+## 🆕 v3.7'de Neler Yeni?
+
+### 🧩 Sıra Örtüşmesi (seqovl) profili
+İlk TLS parçası, gerçek başlangıcından **568 bayt geriden** gönderilir ve aradaki boşluk zararsız bir alan adı (`www.google.com`) taşıyan sahte bir ClientHello ile doldurulur. Sunucu gerçek ilk baytı beklediği için öncesini atar ve yalnızca gerçek isteği birleştirir; akışı en erken sıra numarasından okuyan bir DPI kutusu ise sahte alan adını görür. Durum takipli (stateful) DPI'lara karşı strateji merdivenine yeni bir basamak olarak eklendi.
+
+### 🎙 Sesli sohbet koruması (deneysel, varsayılan kapalı)
+Kanal 3'te, Discord ses sunucularının UDP portlarına (`50000-50100`, `19294-19344`) giden **her akışın ilk iki paketinin** önüne aynı boyutta sahte paketler eklenir. DPI bir UDP akışını ilk birkaç datagramdan sınıflandırır; kurulu bir görüşme bu korumadan hiçbir ek yük görmez. Sesli kanala bağlanamıyorsanız açın.
+
+### 🧠 Ağ hafızası
+Bir ağda **doğrulanmış** bir bağlantı kurulduğunda kanal ve DPI profili o ağ için hatırlanır. Ağ; İSS'nin AS numarası, Wi-Fi adı (kablolu bağlantıda ağ kartı) ve ağ geçidinden üretilen **kısaltılmış bir parmak iziyle** tanınır. Kayıtlar yalnızca bu bilgisayarda, `%APPDATA%\DiscordDNS\networks.json` dosyasında tutulur. Elle yaptığınız kanal ve profil seçimleri her zaman önceliklidir; tepsi menüsündeki **Bu Ağın Hafızasını Sil** ile silinebilir.
+
+### 🕵 DNS sızıntı testi & tarayıcı kontrolü
+- Sistem çözümleyicisi üzerinden `whoami.akamai.net` sorulur; Akamai'nin yetkili sunucusu, soruyu kimin sorduğunu yanıt olarak döndürür. Bu adres bilinen DNS sağlayıcılarıyla eşleştirilir: beklenen sağlayıcı (örneğin Cloudflare) yerine başka biri yanıtlıyorsa uygulama bunu **olası sızıntı** olarak bildirir.
+- Chrome, Edge, Brave, Opera, Vivaldi ve Firefox'un **kendi şifreli DNS** ayarı okunur. "Güvenli" moddaki bir tarayıcı sistem DNS'ini hiç kullanmaz — bağlantıyı kestikten sonra bir sitenin tarayıcıda açılmaya devam etmesinin en yaygın nedeni budur. Test hiçbir ayarı değiştirmez; adresler raporda maskelenir.
+
+### 🔔 Tepsiden Bağlan / Bağlantıyı Kes
+Tepsi simgesine sağ tıklayıp pencereyi açmadan **⚡ Bağlan / ⏹ Bağlantıyı Kes** diyebilirsiniz; menünün üstünde anlık bağlantı durumu yazar. Simgeye sol tıklamak pencereyi açar.
+
+### ⬆ Güncelleme bildirimi
+Uygulama açıldıktan kısa süre sonra GitHub'daki son yayınlanmış sürümü sorar. Daha yenisi varsa başlıkta bir düğme belirir ve yalnızca proje sürüm sayfasını açar — **hiçbir şey kendiliğinden indirilmez veya çalıştırılmaz.** İstek kişisel veri taşımaz.
+
+### 🧭 Daha isabetli ağ kartı seçimi
+Ağ kartları artık Windows'un kendi yönlendirme tablosuna göre sıralanır: internete gerçekten çıkan kart başa gelir, Wi-Fi Direct ve Bluetooth gibi sanal kartlar elenir. Önceden bu sanal kartlar listenin başına geçebiliyor ve ağ otopilotu DNS'i yanlış karta uygulayabiliyordu.
+
+### 📋 Genişletilmiş Discord alan adı listesi
+Yalnızca Discord profili artık **21 alan adını** kapsar (`discord.media`, `discordcdn.com`, `discord.dev`, `dis.gd`, `discordsays.com`, ek yükleme deposu ve diğerleri). Liste DoH çözümlemesi ve sertifika alan adlarıyla doğrulandı.
+
+### 💾 Seçimler artık ekrana da yansıyor
+Kaydedilen kanal, DNS sağlayıcısı ve DPI profili önceden belleğe yükleniyor ama düğmeler her açılışta varsayılan değerleri gösteriyordu. Arayüz artık gerçekten kullanılacak ayarı gösterir.
 
 ---
 
@@ -115,6 +147,8 @@ Motor, GoodbyeDPI'nin HTTPS/SNI tekniklerinin tamamını kendi kodumuzla uygular
 | `--blacklist` alan adı listesi | ✅ `%APPDATA%\DiscordDNS\blacklist.txt` |
 | `--dns-addr` DNS yönlendirme | ✅ yerine şifreli yerel DoH çözümleyici |
 | `-k` HTTP isteğini N parçaya bölme | ➖ TLS bölme mevcut, HTTP için ayrı parçalama yok |
+| *(zapret)* `--dpi-desync-split-seqovl` sıra örtüşmesi | ✅ `seqovl` profili, sahte ClientHello deseniyle |
+| *(zapret)* UDP `fake` + `--dpi-desync-cutoff` | ✅ deneysel sesli sohbet koruması (Discord ses portları) |
 | Windows servisi olarak kurulum | ➖ uygulama açıkken çalışır |
 
 ### Performans
@@ -136,6 +170,9 @@ Motor, çekirdek filtresi sayesinde yalnızca ClientHello ve HTTP isteklerini ku
 ```bash
 # Birim testleri: paket cerrahisi, SNI, bölme, sağlama, otomatik TTL, RST filtresi
 python -m tests.test_dpi_engine
+
+# v3.7 özellikleri: seqovl, ses UDP, ağ hafızası, sızıntı testi, güncelleme, kart sıralaması
+python -m tests.test_v37_features
 
 # Paket kanıtı: gerçek bir ClientHello'nun telde nasıl parçalandığını gösterir
 python -m tests.test_dpi_wire
@@ -164,7 +201,7 @@ Tek buton, beş durum — ve her ikisi de **doğrulanır**:
 
 **BAĞLAN** yalnızca ayar uygulamaz; uyguladıktan sonra hedeflere **gerçek TLS bağlantısı** açar. Hâlâ engelliyse, çalışan bir profil bulunana kadar merdiveni kendisi tırmanır ve ancak ölçülen bir başarıdan sonra "bağlandı" der. Bulamazsa nedeni katman katman loglar.
 
-**BAĞLANTIYI KES** motorları durdurur, **kendi orijinal DNS sunucularınızı** geri yükler (DHCP'ye değil) ve sonra **doğrular**: motor gerçekten durdu mu, çözümleyici kapandı mı, ağ kartı hâlâ `127.0.0.1`'e mi bakıyor. Eksik kalan bir şey varsa açıkça söyler.
+**BAĞLANTIYI KES** motorları durdurur, ağ kartını **otomatik (DHCP) DNS moduna** alır ve sonra **doğrular**: motor gerçekten durdu mu, çözümleyici kapandı mı, ağ kartı hâlâ `127.0.0.1`'e mi bakıyor. Eksik kalan bir şey varsa açıkça söyler.
 
 **Otomatik toparlama:** Bağlıyken İSS davranışını değiştirirse uygulama kendi kendine çalışan yeni bir strateji arar ve ona geçer — siz hiçbir şey yapmadan.
 
@@ -243,7 +280,7 @@ Kanal 2 açıkken uygulama **görev yöneticisinden zorla kapatılırsa** (norma
 
 1. **Güvenlik ağı** — ikincil DNS olarak Cloudflare yazılır; yerel çözümleyici susarsa Windows otomatik ona düşer, internet kesilmez.
 2. **Nöbetçi (watchdog)** — uygulama açıkken her 30 saniyede kontrol eder; DNS `127.0.0.1`'de ama çözümleyici kapalıysa kendi kendine geri alır.
-3. **Açılışta onarım** — uygulama yönetici olarak açıldığında yedekteki orijinal DNS'i geri yükler.
+3. **Açılışta onarım** — uygulama yönetici olarak açıldığında ağ kartını otomatik (DHCP) DNS moduna geri alır.
 
 Yine de elle düzeltmek istersen, yönetici komut isteminde:
 
@@ -314,13 +351,17 @@ Discord-DNS/
 ├── doh_proxy.py         # Yerel DNS-over-HTTPS çözümleyici (127.0.0.1:53 → 443/TLS)
 ├── strategy_finder.py   # Otomatik strateji bulucu (profilleri ölçerek seçer)
 ├── diagnostics.py       # Paylaşılabilir tanılama raporu (kişisel veri maskeli)
+├── leak_test.py         # DNS sızıntı testi & tarayıcı şifreli DNS kontrolü (salt okunur)
+├── network_memory.py    # Ağ başına doğrulanmış ayar hafızası (yalnızca yerel)
+├── updater.py           # GitHub sürüm denetimi (indirme yapmaz)
+├── version.py           # Sürüm bilgisi için tek kaynak
 ├── discord_checker.py   # Discord HTTP & Ses Bölgesi Ping ölçüm modülü
 ├── heartbeat_guard.py   # Kesintisiz bağlantı bekçi daemoni (Smart Failover)
 ├── dns_benchmark.py     # Multi-DNS ping & gecikme kıyaslama motoru
 ├── admin_utils.py       # Windows UAC Yönetici izni doğrulama & yükseltme
 ├── build_exe.py         # PyInstaller tek-dosya derleme betiği
 ├── requirements.txt     # Python bağımlılıkları
-├── tests/               # Tanılama ve birim testleri (test_dpi_engine, test_dpi_live)
+├── tests/               # Tanılama ve birim testleri (test_dpi_engine, test_v37_features, test_dpi_live)
 └── assets/              # İkonlar + WinDivert 2.2 sürücü dosyaları (x64/x86)
 ```
 
@@ -331,6 +372,16 @@ Discord-DNS/
 Uygulama, Windows ağ kartı DNS adreslerini düzenlemek ve **WinDivert 2.2** ağ sürücüsünü yüklemek için **Yönetici Yetkisi (Administrator Privileges)** gerektirir. Sürücü dosyaları `assets/windivert/` altında imzalı olarak gelir; çalışırken `%APPDATA%\DiscordDNS\bin\windivert\` klasörüne kopyalanır ve son tanıtıcı kapandığında Windows tarafından kaldırılır. 
 
 Derlenmiş `.exe` dosyaları imzasız (unsigned executable) olduğu için Windows Defender veya bazı antivirüs yazılımları ağ sürücüsü müdahalesinden dolayı "yalancı pozitif" (false-positive) uyarısı verebilir. Kodların tamamı açık kaynaklıdır ve incelemenize açıktır.
+
+---
+
+## 🙏 İlham Alınan Projeler
+
+Motor kendi kodumuzla yazılmıştır; aşağıdaki açık kaynak projelerin kodu kullanılmamıştır, ancak tekniklerin belgelenmesi ve denenmesi konusunda yol göstermişlerdir:
+
+- [GoodbyeDPI](https://github.com/ValdikSS/GoodbyeDPI) — ValdikSS (Apache-2.0)
+- [zapret](https://github.com/bol-van/zapret) — bol-van (MIT)
+- [zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) — Flowseal (MIT)
 
 ---
 

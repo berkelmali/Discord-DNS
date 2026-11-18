@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — PyInstaller Build Script
+Discord DNS v3.7 — PyInstaller Build Script
 Produces a single-file, windowless, UAC-elevated Windows executable.
 Run: python build_exe.py
 """
@@ -15,7 +15,7 @@ BUILD_DIR = "./build"
 
 def build():
     print("=" * 55)
-    print("  Discord DNS v3.6 -- PyInstaller Derleme Baslatiliyor")
+    print("  Discord DNS v3.7 -- PyInstaller Derleme Baslatiliyor")
     print("=" * 55)
 
     # Clean up old exes and spec files to keep a single application
@@ -64,6 +64,10 @@ def build():
         "--hidden-import=dpi_packets",
         "--hidden-import=doh_proxy",
         "--hidden-import=windivert",
+        "--hidden-import=leak_test",
+        "--hidden-import=network_memory",
+        "--hidden-import=updater",
+        "--hidden-import=version",
         # UPX must never touch the signed WinDivert driver files — a repacked
         # .sys loses its Microsoft-accepted signature and Windows refuses to load it.
         "--upx-exclude=WinDivert.dll",

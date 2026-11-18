@@ -65,7 +65,8 @@ def release_single_instance() -> None:
 def focus_existing_instance() -> bool:
     """Bring the already-running window to the front, if it can be found."""
     try:
-        hwnd = ctypes.windll.user32.FindWindowW(None, "Discord DNS v3.6")
+        import version
+        hwnd = ctypes.windll.user32.FindWindowW(None, version.APP_TITLE)
         if hwnd:
             ctypes.windll.user32.ShowWindow(hwnd, 9)      # SW_RESTORE
             ctypes.windll.user32.SetForegroundWindow(hwnd)

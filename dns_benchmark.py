@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — Multi-DNS Speed Benchmark Engine
+Discord DNS v3.7 — Multi-DNS Speed Benchmark Engine
 Concurrently measures DNS resolution latency to Discord domain endpoints (discord.com)
 across top DNS providers using direct socket DNS queries.
 """

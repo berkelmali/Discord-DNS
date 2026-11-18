@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — Local DNS-over-HTTPS Resolver
+Discord DNS v3.7 — Local DNS-over-HTTPS Resolver
 A tiny DNS server that listens on 127.0.0.1:53 (UDP + TCP) and answers by
 forwarding every query over HTTPS (RFC 8484) to Cloudflare / Google / Quad9.
 

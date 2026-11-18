@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — Packet Surgery Toolkit
+Discord DNS v3.7 — Packet Surgery Toolkit
 Pure, side-effect-free parsing and rebuilding of IPv4/IPv6 + TCP packets, TLS
 ClientHello (SNI) and HTTP request headers.
 
@@ -133,6 +133,115 @@ def parse_tcp_packet(packet: bytes) -> Optional[TcpPacket]:
         src_ip=src_ip,
         dst_ip=dst_ip,
     )
+
+
+@dataclass
+class UdpPacket:
+    """Offsets and fields of a diverted IPv4/IPv6 UDP datagram."""
+
+    raw: bytes
+    version: int
+    ip_hlen: int
+    udp_off: int
+    payload: bytes
+    src_port: int
+    dst_port: int
+    src_ip: bytes
+    dst_ip: bytes
+    ttl: int
+
+
+def parse_udp_packet(packet: bytes) -> Optional[UdpPacket]:
+    """Parse an IPv4/IPv6 UDP datagram. Returns None when it is not usable."""
+    if len(packet) < 28:
+        return None
+    version = packet[0] >> 4
+    if version == 4:
+        ip_hlen = (packet[0] & 0x0F) * 4
+        if ip_hlen < 20 or packet[9] != PROTO_UDP or len(packet) < ip_hlen + 8:
+            return None
+        if struct.unpack_from("!H", packet, 6)[0] & 0x1FFF:   # fragment
+            return None
+        src_ip, dst_ip, ttl = bytes(packet[12:16]), bytes(packet[16:20]), packet[8]
+    elif version == 6:
+        ip_hlen = 40
+        if len(packet) < 48 or packet[6] != PROTO_UDP:
+            return None
+        src_ip, dst_ip, ttl = bytes(packet[8:24]), bytes(packet[24:40]), packet[7]
+    else:
+        return None
+
+    udp_off = ip_hlen
+    src_port, dst_port, udp_len = struct.unpack_from("!HHH", packet, udp_off)
+    end = min(len(packet), udp_off + udp_len) if udp_len >= 8 else len(packet)
+    return UdpPacket(
+        raw=bytes(packet), version=version, ip_hlen=ip_hlen, udp_off=udp_off,
+        payload=bytes(packet[udp_off + 8:end]), src_port=src_port, dst_port=dst_port,
+        src_ip=src_ip, dst_ip=dst_ip, ttl=ttl,
+    )
+
+
+def build_udp_datagram(pkt: UdpPacket, payload: bytes, ttl: Optional[int] = None,
+                       ip_id: Optional[int] = None) -> bytearray:
+    """Rebuild a UDP datagram with a new payload; checksums are left to the driver."""
+    out = bytearray(pkt.raw[:pkt.udp_off + 8]) + bytearray(payload)
+    udp_len = 8 + len(payload)
+    struct.pack_into("!H", out, pkt.udp_off + 4, udp_len)
+    struct.pack_into("!H", out, pkt.udp_off + 6, 0)          # recalculated
+    if pkt.version == 4:
+        struct.pack_into("!H", out, 2, len(out))
+        if ip_id is not None:
+            struct.pack_into("!H", out, 4, ip_id & 0xFFFF)
+        if ttl is not None:
+            out[8] = max(1, min(255, ttl))
+        struct.pack_into("!H", out, 10, 0)
+    else:
+        struct.pack_into("!H", out, 4, udp_len)
+        if ttl is not None:
+            out[7] = max(1, min(255, ttl))
+    return out
+
+
+_FAKE_HELLO_CACHE: dict = {}
+
+
+def fake_client_hello(sni: str = "www.google.com") -> bytes:
+    """
+    A genuine ClientHello for an innocuous host, produced by the local TLS stack.
+
+    Used as the overlap pattern for the sequence-overlap strategy: a DPI box that
+    reassembles from the earliest sequence number reads this first and files the
+    connection under a harmless name. Generating it at runtime means no captured
+    binary blob ships with the app, and the bytes always look like what this
+    machine's TLS library actually sends.
+    """
+    if sni in _FAKE_HELLO_CACHE:
+        return _FAKE_HELLO_CACHE[sni]
+    import ssl
+    try:
+        context = ssl.create_default_context()
+        incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+        session = context.wrap_bio(incoming, outgoing, server_hostname=sni)
+        try:
+            session.do_handshake()
+        except ssl.SSLWantReadError:
+            pass
+        hello = outgoing.read()
+    except Exception:
+        hello = b""
+    if not hello or hello[0] != TLS_RECORD_HANDSHAKE:
+        # Extremely unlikely; fall back to a minimal well-formed record header
+        hello = bytes([TLS_RECORD_HANDSHAKE, 0x03, 0x01, 0x00, 0x00])
+    _FAKE_HELLO_CACHE[sni] = hello
+    return hello
+
+
+def seqovl_pattern(length: int, sni: str = "www.google.com") -> bytes:
+    """Exactly `length` bytes of fake ClientHello, repeated as needed."""
+    if length <= 0:
+        return b""
+    hello = fake_client_hello(sni)
+    return (hello * (length // len(hello) + 1))[:length]
 
 
 def infer_hop_count(observed_ttl: int) -> Optional[int]:

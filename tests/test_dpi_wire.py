@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — Wire Proof (no Administrator needed)
+Discord DNS v3.7 — Wire Proof (no Administrator needed)
 Answers one question: what *actually* leaves this machine when the engine
 touches a connection?
 

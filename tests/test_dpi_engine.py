@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — Native DPI Engine Test Suite
+Discord DNS v3.7 — Native DPI Engine Test Suite
 Validates the packet surgery (parsing, SNI extraction, splitting, rebuilding)
 with synthetic packets. Needs no Administrator rights and touches no traffic.
 
@@ -752,7 +752,7 @@ def test_settings_and_failover():
 
 def run_tests():
     print("=" * 62)
-    print("  DISCORD DNS v3.6 -- NATIVE DPI ENGINE TEST SUITE")
+    print("  DISCORD DNS v3.7 -- NATIVE DPI ENGINE TEST SUITE")
     print("=" * 62)
 
     test_parsing()

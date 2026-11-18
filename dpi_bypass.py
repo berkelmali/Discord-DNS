@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — DPI Bypass Facade & ISP Auto-Detector
+Discord DNS v3.7 — DPI Bypass Facade & ISP Auto-Detector
 
 The bypass itself is now ours: dpi_engine.py drives WinDivert directly, so no
 external goodbyedpi.exe process is downloaded or launched in the normal path.

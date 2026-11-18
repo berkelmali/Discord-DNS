@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — Premium GUI
+Discord DNS v3.7 — Premium GUI
 CustomTkinter dark-mode interface with Discord-native design language.
 Features: DNS preset switcher, Voice Region Ping Matrix, Heartbeat Guard,
           System Tray minimization, auto DNS restore on exit.
@@ -9,6 +9,8 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox
 import threading
+import dataclasses
+import re
 import datetime
 import time
 import sys
@@ -41,6 +43,7 @@ import atexit
 import signal
 
 import dns_manager
+import version
 import discord_checker
 import admin_utils
 import heartbeat_guard
@@ -50,6 +53,10 @@ import dpi_engine
 import doh_proxy
 import diagnostics
 import strategy_finder
+import leak_test
+import network_memory
+import updater
+import webbrowser
 
 # ─── Theme ────────────────────────────────────────────────────────────────────────
 
@@ -131,7 +138,7 @@ class DiscordDNSApp(ctk.CTk):
         super().__init__()
 
         # Window setup
-        self.title("Discord DNS v3.6")
+        self.title(version.APP_TITLE)
         # Real sizing happens in _fit_window() once the widgets exist and their
         # true width is known. A fixed 820x980 assumed a big desktop at 100%
         # scaling: on a high-DPI laptop the same numbers become ~1550x1860 after
@@ -175,6 +182,14 @@ class DiscordDNSApp(ctk.CTk):
         self._autopilot_last_adapter = self.selected_adapter
         self.active_channel        = self._config.get("channel") or "Kanal 1: Standart"
         self.isp_info              = {"isp": "Algılanıyor...", "recommendation_text": "İSS Tespiti Yapılıyor..."}
+        self._profile_user_chosen  = bool(self._config.get("dpi_profile_manual"))
+        self.voice_var             = tk.BooleanVar(value=bool(self._config.get("udp_voice", False)))
+        self.check_updates_enabled = bool(self._config.get("check_updates", True))
+        self._network_key          = ""    # fingerprint of the network we are on
+        self._network_label        = ""
+        self._active_mode          = None  # DPI preset the running engine was started with
+        self._update_info          = None
+        dpi_engine.set_user_options(udp_voice=self.voice_var.get())
 
         # Ensure app starts with normal DNS (DHCP) on launch until user presses button
         if self.is_admin_user:
@@ -205,6 +220,8 @@ class DiscordDNSApp(ctk.CTk):
         self.after(1500, self._start_dns_benchmark)
         # Late enough that detection and the speed test have settled
         self.after(6000, self._maybe_auto_connect)
+        # Quietly ask GitHub whether a newer release exists — never downloads
+        self.after(12000, self._check_updates_async)
 
         # X button → minimize to tray (not quit)
         self.protocol("WM_DELETE_WINDOW", self._minimize_to_tray)
@@ -245,10 +262,11 @@ class DiscordDNSApp(ctk.CTk):
         row = self._build_log_console(root, row)
 
         self._build_status_bar()
+        self._restore_saved_choices()
         self._fit_window()
 
         # Initial log
-        self.log("Discord DNS v3.6 başlatıldı.")
+        self.log(f"{version.APP_TITLE} başlatıldı.")
         if not self.is_admin_user:
             self.log("⚠  Yönetici yetkisi yok. DNS değiştirmek için yetki yükseltin.")
 
@@ -289,7 +307,7 @@ class DiscordDNSApp(ctk.CTk):
         ).pack(side="left")
 
         version_badge = ctk.CTkLabel(
-            title_frame, text="v3.6",
+            title_frame, text=f"v{version.APP_VERSION.rsplit('.', 1)[0]}",
             font=ctk.CTkFont(family="Segoe UI Variable", size=11, weight="bold"),
             fg_color=BLURPLE, text_color="#FFFFFF",
             corner_radius=6, padx=8, pady=2
@@ -304,6 +322,15 @@ class DiscordDNSApp(ctk.CTk):
             command=self.show_info_dialog
         )
         info_btn.pack(side="left", padx=(10, 0), pady=(4, 0))
+
+        # Packed only when the update check finds a newer release
+        self.update_btn = ctk.CTkButton(
+            title_frame, text="⬆  Güncelleme var",
+            font=ctk.CTkFont(family="Segoe UI Variable", size=11, weight="bold"),
+            fg_color=GREEN_BG, hover_color=SURFACE, text_color=GREEN,
+            height=26, corner_radius=6, border_width=1, border_color=GREEN,
+            command=self.open_update_page
+        )
 
         # Subtitle
         ctk.CTkLabel(
@@ -416,6 +443,169 @@ class DiscordDNSApp(ctk.CTk):
         if recommended:
             self.channel_seg.set(recommended)
             self.on_channel_change(recommended, user_initiated=False)
+
+        # A measured result for this exact network beats a guess from the ISP
+        self._identify_network_async()
+
+    # ── NETWORK MEMORY ─────────────────────────────────────────────────────────────
+
+    CHANNEL_VALUES = ("🟢 Kanal 1: Standart", "🔒 Kanal 2: DoH Şifreli", "⚡ Kanal 3: DPI Bypass")
+
+    @staticmethod
+    def _channel_number(text: str) -> str:
+        match = re.search(r"Kanal\s*(\d)", text or "")
+        return match.group(1) if match else ""
+
+    def _channel_value(self, text: str):
+        number = self._channel_number(text)
+        return next((v for v in self.CHANNEL_VALUES if self._channel_number(v) == number), None)
+
+    def _show_profile(self, profile):
+        """Make the DPI profile menu show what is actually selected."""
+        try:
+            if profile in dpi_engine.PRESETS:
+                self.profile_dropdown.set(dpi_engine.PRESETS[profile].name)
+            else:
+                self.profile_dropdown.set("Otomatik (İSS'ye göre)")
+        except Exception:
+            pass
+
+    def _restore_saved_choices(self):
+        """
+        Show last session's choices in the widgets.
+
+        The settings were loaded into memory, but the channel switch, the DNS
+        menu and the profile menu were always built on their defaults — so the
+        window said Kanal 1 while the app was about to connect on Kanal 3.
+        """
+        value = self._channel_value(self.active_channel)
+        if value:
+            self.channel_seg.set(value)
+            self.on_channel_change(value, user_initiated=False, quiet=True)
+        if self.current_preset in dns_manager.DNS_PRESETS:
+            self.preset_dropdown.set(self.current_preset)
+        self._show_profile(self.selected_profile)
+
+    def _identify_network_async(self):
+        adapter = self.selected_adapter
+        info = dict(self.isp_info or {})
+
+        def _job():
+            try:
+                key, label = network_memory.identify(info, adapter)
+                remembered = network_memory.recall(key)
+            except Exception:
+                key, label, remembered = "", "", None
+            self._ui(self._apply_network_memory, key, label, remembered)
+        threading.Thread(target=_job, daemon=True).start()
+
+    def _apply_network_memory(self, key, label, remembered):
+        """Start from the setup that was measured to work on this network."""
+        self._network_key, self._network_label = key, label
+        if not key or not remembered:
+            return
+
+        self.log(f"🧠 Bu ağ tanındı ({label}) — daha önce "
+                 f"{remembered.get('successes', 0)} kez doğrulanmış ayar var.")
+        if self.connection_state != "disconnected":
+            return
+
+        applied = []
+        target = self._channel_value(remembered.get("channel", ""))
+        if target and not self._channel_user_chosen \
+                and self._channel_number(target) != self._channel_number(self.active_channel):
+            self.channel_seg.set(target)
+            self.on_channel_change(target, user_initiated=False)
+            applied.append(target)
+
+        profile = remembered.get("dpi_profile")
+        if profile in dpi_engine.PRESETS and not self._profile_user_chosen \
+                and profile != self.selected_profile:
+            self.selected_profile = profile
+            self._show_profile(profile)
+            applied.append(f"profil: {dpi_engine.PRESETS[profile].name}")
+
+        if applied:
+            self.log("↪ Hatırlanan ayarlar uygulandı: " + ", ".join(applied))
+            self._save_settings()
+        elif self._channel_user_chosen or self._profile_user_chosen:
+            self.log("↪ Elle yaptığınız seçim korunuyor.")
+
+    def _remember_network(self):
+        """Record what just worked here, so the next connection starts on it."""
+        if not self._network_key:
+            return
+        profile = self._active_mode if "Kanal 3" in self.active_channel else None
+        try:
+            network_memory.remember(self._network_key, self._network_label,
+                                    self.active_channel, profile, self.current_preset)
+        except Exception as e:
+            self.log(f"Ağ hafızası kaydedilemedi: {e}")
+
+    def forget_this_network(self):
+        if self._network_key and network_memory.forget(self._network_key):
+            self.log("🧠 Bu ağ için hatırlanan ayarlar silindi.")
+        else:
+            self.log("🧠 Bu ağ için hatırlanan bir ayar yok.")
+
+    # ── UPDATE CHECK ───────────────────────────────────────────────────────────────
+
+    def _check_updates_async(self):
+        if not self.check_updates_enabled or not self._alive():
+            return
+
+        def _job():
+            info = updater.check_for_update()
+            self._ui(self._apply_update_info, info)
+        threading.Thread(target=_job, daemon=True).start()
+
+    def _apply_update_info(self, info):
+        self._update_info = info
+        if info.error:
+            return   # offline or rate-limited: say nothing, try again next launch
+        if not info.available:
+            return
+        self.log(info.message)
+        try:
+            self.update_btn.configure(text=f"⬆  {info.latest} hazır")
+            self.update_btn.pack(side="left", padx=(10, 0), pady=(4, 0))
+        except Exception:
+            pass
+        if self._tray_icon:
+            try:
+                self._tray_icon.notify(f"{info.latest} yayınlandı — indirmek için uygulamadaki "
+                                       "güncelleme düğmesine basın.", "Discord DNS güncellemesi")
+            except Exception:
+                pass
+
+    def open_update_page(self):
+        url = self._update_info.url if self._update_info else version.RELEASES_URL
+        if not url.startswith(version.REPO_URL):
+            url = version.RELEASES_URL
+        webbrowser.open(url)
+
+    # ── LEAK TEST ──────────────────────────────────────────────────────────────────
+
+    def run_leak_test(self):
+        """Who really answers this machine's DNS, and do the browsers even ask?"""
+        self.log("🕵 DNS sızıntı testi çalışıyor…")
+        adapter = self.selected_adapter
+
+        def _job():
+            try:
+                state = dns_manager.get_current_dns(adapter)
+                doh_stats = doh_proxy.stats() if doh_proxy.is_running() else {}
+                expected = leak_test.expected_operator(
+                    doh_proxy.is_running(), doh_stats.get("active_upstream", ""),
+                    state.get("preset_name", ""), state.get("is_dhcp", False),
+                    state.get("ipv4") or [])
+                result = leak_test.run_leak_test(expected)
+                lines = leak_test.report_lines(result, leak_test.check_browsers())
+            except Exception as e:
+                lines = [f"Sızıntı testi başarısız: {e}"]
+            for line in lines:
+                self._ui(self.log, "    " + line)
+        threading.Thread(target=_job, daemon=True).start()
 
     # ── STATUS CARDS ───────────────────────────────────────────────────────────────
 
@@ -785,6 +975,19 @@ class DiscordDNSApp(ctk.CTk):
         )
         self.doh_chk.pack(anchor="w", padx=22, pady=(4, 2))
 
+        self.voice_chk = ctk.CTkCheckBox(
+            frame,
+            text="🎙 Sesli sohbet koruması (deneysel — Kanal 3, Discord ses UDP)",
+            variable=self.voice_var,
+            command=self.toggle_voice,
+            font=ctk.CTkFont(family="Segoe UI Variable", size=11),
+            text_color=TEXT_DIM,
+            fg_color=BLURPLE, hover_color=BLURPLE_DIM,
+            checkmark_color="#FFF", border_color=BORDER,
+            corner_radius=6
+        )
+        self.voice_chk.pack(anchor="w", padx=22, pady=(4, 2))
+
         self.autostart_chk = ctk.CTkCheckBox(
             frame,
             text="🚀 Windows açıldığında uygulamayı başlat",
@@ -813,7 +1016,7 @@ class DiscordDNSApp(ctk.CTk):
 
         self.auto_chk = ctk.CTkCheckBox(
             frame,
-            text="Çıkışta orijinal DNS'e otomatik geri dön",
+            text="Çıkışta DNS'i otomatik (DHCP) moduna geri döndür",
             variable=self.auto_restore_on_exit,
             command=self._save_settings,
             font=ctk.CTkFont(family="Segoe UI Variable", size=11),
@@ -1056,9 +1259,10 @@ class DiscordDNSApp(ctk.CTk):
             text_color=TEXT_DIM, height=28, corner_radius=6
         )
 
-        ctk.CTkButton(bar, text="Flush DNS", width=80, command=self.manual_flush_dns, **btn_kw).grid(row=0, column=2, padx=3, pady=6)
-        ctk.CTkButton(bar, text="📡 Tara", width=70, command=self._start_region_scan, **btn_kw).grid(row=0, column=3, padx=3, pady=6)
-        ctk.CTkButton(bar, text="Yenile", width=65, command=self.refresh_status, **btn_kw).grid(row=0, column=4, padx=(3, 18), pady=6)
+        ctk.CTkButton(bar, text="🕵 Sızıntı Testi", width=105, command=self.run_leak_test, **btn_kw).grid(row=0, column=2, padx=3, pady=6)
+        ctk.CTkButton(bar, text="Flush DNS", width=80, command=self.manual_flush_dns, **btn_kw).grid(row=0, column=3, padx=3, pady=6)
+        ctk.CTkButton(bar, text="📡 Tara", width=70, command=self._start_region_scan, **btn_kw).grid(row=0, column=4, padx=3, pady=6)
+        ctk.CTkButton(bar, text="Yenile", width=65, command=self.refresh_status, **btn_kw).grid(row=0, column=5, padx=(3, 18), pady=6)
 
     # ═══════════════════════════════════════════════════════════════════════════════
     #  SYSTEM TRAY  (always visible while app is running)
@@ -1070,17 +1274,46 @@ class DiscordDNSApp(ctk.CTk):
             return
         img = _load_tray_icon()
         menu = pystray.Menu(
-            TrayItem("Discord DNS v3.6", lambda: None, enabled=False),
+            TrayItem(version.APP_TITLE, lambda: None, enabled=False),
+            TrayItem(lambda item: self._tray_status_text(), lambda: None, enabled=False),
             pystray.Menu.SEPARATOR,
-            TrayItem("Pencereyi Aç / Göster",  self._tray_show_window),
+            TrayItem(lambda item: self._tray_toggle_text(), self._tray_toggle_connection,
+                     enabled=lambda item: self.connection_state not in ("connecting", "disconnecting")),
+            TrayItem("Pencereyi Aç / Göster",  self._tray_show_window, default=True),
             TrayItem("DNS Durumunu Yenile",    lambda i, item: self._ui(self.refresh_status)),
             TrayItem("DNS Önbelleğini Temizle", lambda i, item: self._ui(self.manual_flush_dns)),
+            TrayItem("DNS Sızıntı Testi",       lambda i, item: self._ui(self.run_leak_test)),
+            TrayItem("Bu Ağın Hafızasını Sil",  lambda i, item: self._ui(self.forget_this_network)),
             pystray.Menu.SEPARATOR,
             TrayItem("Çıkış",                  self._tray_exit),
         )
-        self._tray_icon = pystray.Icon("DiscordDNS", img, "Discord DNS v3.6 — Koruma kapalı", menu)
+        self._tray_icon = pystray.Icon("DiscordDNS", img, f"{version.APP_TITLE} — Koruma kapalı", menu)
         threading.Thread(target=self._tray_icon.run, daemon=True).start()
         self._refresh_tray_tooltip()
+
+    def _tray_status_text(self) -> str:
+        return {
+            "connected": "● Bağlı",
+            "connecting": "● Bağlanılıyor…",
+            "disconnecting": "● Kapatılıyor…",
+            "error": "● Bağlı — engel aşılamadı",
+        }.get(self.connection_state, "○ Bağlı değil")
+
+    def _tray_toggle_text(self) -> str:
+        if self.connection_state in ("connected", "error"):
+            return "⏹ Bağlantıyı Kes"
+        return "⚡ Bağlan"
+
+    def _tray_toggle_connection(self, icon=None, item=None):
+        """Connect or disconnect without opening the window, like a VPN tray."""
+        self._ui(self.toggle_dns)
+
+    def _refresh_tray_menu(self):
+        if self._tray_icon:
+            try:
+                self._tray_icon.update_menu()
+            except Exception:
+                pass
 
     def _refresh_tray_tooltip(self):
         """
@@ -1100,7 +1333,7 @@ class DiscordDNSApp(ctk.CTk):
             parts.append(f"🟢 {self.dns_state.get('preset_name', 'DNS')}")
         status = " · ".join(parts) if parts else "Koruma kapalı"
         try:
-            self._tray_icon.title = f"Discord DNS v3.6 — {status}"
+            self._tray_icon.title = f"{version.APP_TITLE} — {status}"
         except Exception:
             pass
 
@@ -1303,6 +1536,7 @@ class DiscordDNSApp(ctk.CTk):
         self.selected_adapter = new_adapter
         self.adapter_dropdown.set(new_adapter)
         self.log(f"🔄 AĞ OTOPİLOTU: Aktif ağ kartı değişti → {new_adapter}")
+        self._identify_network_async()
         is_managed = self.user_dns_enabled and self.dns_state and not self.dns_state.get("is_dhcp")
         if is_managed:
             dns_manager.set_preset_dns(new_adapter, self.current_preset, enable_doh=self.doh_enabled_var.get())
@@ -1330,7 +1564,7 @@ class DiscordDNSApp(ctk.CTk):
         self.log(f"Profil: {self.current_preset}")
         self._sync_action_button()
 
-    def on_channel_change(self, choice, user_initiated: bool = True):
+    def on_channel_change(self, choice, user_initiated: bool = True, quiet: bool = False):
         self.active_channel = choice
         if user_initiated:
             self._channel_user_chosen = True
@@ -1350,7 +1584,8 @@ class DiscordDNSApp(ctk.CTk):
         except Exception:
             pass
 
-        self.log(f"Kanal Değişti: {choice}")
+        if not quiet:
+            self.log(f"Kanal Değişti: {choice}")
         self._save_settings()
         self._sync_action_button()
 
@@ -1381,8 +1616,11 @@ class DiscordDNSApp(ctk.CTk):
                 if report.best is not None:
                     ok, message = strategy_finder.apply_report(report)
                     self.selected_profile = report.best.profile
+                    self._active_mode = report.best.profile
+                    self._ui(self._show_profile, report.best.profile)
                     self._ui(self.log, message)
                     if ok:
+                        self._ui(self._remember_network)
                         self._ui(self.log,
                                    f"✅ Toparlandı — {report.best.label} profiline geçildi.")
                         return
@@ -1399,12 +1637,14 @@ class DiscordDNSApp(ctk.CTk):
         """Pick a specific DPI strategy, or hand the decision back to detection."""
         if choice.startswith("Otomatik"):
             self.selected_profile = None
+            self._profile_user_chosen = False
             self.log("DPI profili: otomatik (İSS tespitine göre)")
             self._save_settings()
             return
         for name in dpi_engine.PRESETS:
             if dpi_engine.PRESETS[name].name == choice:
                 self.selected_profile = name
+                self._profile_user_chosen = True
                 config = dpi_engine.PRESETS[name]
                 self.log(f"DPI profili: {config.name} — {config.description}")
                 self._save_settings()
@@ -1443,6 +1683,9 @@ class DiscordDNSApp(ctk.CTk):
                 "dns_preset": self.current_preset,
                 "dns_preset_manual": self._preset_user_chosen,
                 "dpi_profile": self.selected_profile,
+                "dpi_profile_manual": self._profile_user_chosen,
+                "udp_voice": bool(self.voice_var.get()),
+                "check_updates": self.check_updates_enabled,
                 "auto_restore_on_exit": bool(self.auto_restore_on_exit.get()),
                 "auto_connect_on_start": bool(self.auto_connect_var.get()),
             })
@@ -1457,6 +1700,23 @@ class DiscordDNSApp(ctk.CTk):
         if not ok:
             self.autostart_var.set(dns_manager.is_autostart_enabled())
         self._save_settings()
+
+    def toggle_voice(self):
+        """Experimental Discord voice (UDP) protection for Kanal 3."""
+        enabled = bool(self.voice_var.get())
+        dpi_engine.set_user_options(udp_voice=enabled)
+        self._save_settings()
+        if enabled:
+            self.log("🎙 Sesli sohbet koruması açık (deneysel) — Kanal 3'te Discord ses "
+                     "sunucularına giden ilk UDP paketlerinin önüne sahte paket eklenir.")
+        else:
+            self.log("🎙 Sesli sohbet koruması kapalı.")
+        if dpi_engine.is_running():
+            engine = dpi_engine.get_engine()
+            ok, message = engine.apply_config(dataclasses.replace(engine.config, udp_voice=enabled))
+            self.log(("↪ " if ok else "⚠ ") + message)
+        elif enabled and "Kanal 3" not in self.active_channel:
+            self.log("↪ Bu seçenek yalnızca Kanal 3 (DPI Bypass) ile çalışır.")
 
     def toggle_auto_connect(self):
         """Whether protection should come up by itself when the app starts."""
@@ -1619,6 +1879,7 @@ class DiscordDNSApp(ctk.CTk):
         engine_wanted = "Kanal 3" in self.active_channel
         if engine_wanted:
             mode = self.selected_profile or dpi_bypass.resolve_mode(self.isp_info)
+            self._active_mode = mode
             engine_ok, engine_msg = dpi_bypass.start_dpi_bypass(mode=mode)
             messages.append(engine_msg)
             if not engine_ok:
@@ -1653,6 +1914,8 @@ class DiscordDNSApp(ctk.CTk):
             if report.best is not None:
                 applied_ok, applied_msg = strategy_finder.apply_report(report)
                 self.selected_profile = report.best.profile
+                self._active_mode = report.best.profile
+                self._ui(self._show_profile, report.best.profile)
                 self._ui(self.log, applied_msg)
                 if applied_ok:
                     self._ui(self._on_connect_done, True, "",
@@ -1673,6 +1936,8 @@ class DiscordDNSApp(ctk.CTk):
         if message:
             self.log(message)
         self.log(f"{'✅' if ok else '⚠'}  {label}")
+        if ok and "hâlâ kapalı" not in label:
+            self._remember_network()
         self.user_dns_enabled = True
         self._set_connection_state("connected" if ok else "error")
         if self._guard:
@@ -1715,7 +1980,7 @@ class DiscordDNSApp(ctk.CTk):
             self.log("⚠ Kapatma eksik kaldı: " + ", ".join(problems))
             self._set_connection_state("error")
         else:
-            self.log(f"🔌 Bağlantı kesildi. DNS otomatik (DHCP) moduna döndürüldü.")
+            self.log("🔌 Bağlantı kesildi. DNS otomatik (DHCP) moduna döndürüldü.")
             self._set_connection_state("disconnected")
         self.user_dns_enabled = False
         self.dns_active_start_time = None
@@ -1759,6 +2024,8 @@ class DiscordDNSApp(ctk.CTk):
             self.conn_state_lbl.configure(text=label, text_color=label_colour)
             self.conn_led.configure(text_color=led_colour)
             self.conn_detail_lbl.configure(text=detail)
+            self._refresh_tray_menu()
+            self._refresh_tray_tooltip()
         self._ui(apply)
 
     # ═══════════════════════════════════════════════════════════════════════════════
@@ -1847,7 +2114,10 @@ class DiscordDNSApp(ctk.CTk):
         engine = dpi_bypass.active_engine()
         if engine == dpi_bypass.ENGINE_NATIVE:
             st = dpi_bypass.engine_stats()
-            parts.append(f"⚡ Yerel motor {st.get('packets_rewritten', 0)} paket")
+            text = f"⚡ Yerel motor {st.get('packets_rewritten', 0)} paket"
+            if st.get("udp_flows"):
+                text += f" · 🎙 {st.get('udp_flows', 0)} ses akışı"
+            parts.append(text)
         elif engine == dpi_bypass.ENGINE_GOODBYEDPI:
             parts.append("⚡ Yedek motor (goodbyedpi)")
 
@@ -1928,7 +2198,7 @@ class DiscordDNSApp(ctk.CTk):
     def show_info_dialog(self):
         """Open a detailed, dark-themed information & user guide window."""
         dialog = ctk.CTkToplevel(self)
-        dialog.title("ℹ Discord DNS v3.6 — Bilgi & Kullanım Rehberi")
+        dialog.title(f"ℹ {version.APP_TITLE} — Bilgi & Kullanım Rehberi")
         # Clamp to the screen in the same units the widgets use, so the guide
         # does not open taller than the desktop on a scaled display.
         scaling = self._display_scaling()
@@ -1953,7 +2223,7 @@ class DiscordDNSApp(ctk.CTk):
         hdr.pack(fill="x", padx=16, pady=(16, 8))
 
         ctk.CTkLabel(
-            hdr, text="⚡ Discord DNS v3.6 — Uygulama Rehberi & Bilgi",
+            hdr, text=f"⚡ {version.APP_TITLE} — Uygulama Rehberi & Bilgi",
             font=ctk.CTkFont(family="Segoe UI Variable Display", size=16, weight="bold"),
             text_color="#FFFFFF"
         ).pack(side="left", padx=16, pady=12)
@@ -1968,14 +2238,30 @@ class DiscordDNSApp(ctk.CTk):
              "2. Kanal, İSS'nize göre zaten otomatik seçilidir — dokunmanıza gerek yok.\n"
              "3. ⚡ BAĞLAN'a basın. Uygulama ayarları uygular, sonra gerçek bir bağlantı kurup çalıştığını doğrular "
              "ve ancak o zaman 'BAĞLI' yazar.\n\n"
-             "Hepsi bu. İşiniz bitince ⏹ BAĞLANTIYI KES deyin; DNS ayarlarınız kendi orijinal sunucularınıza geri döner."),
+             "Hepsi bu. İşiniz bitince ⏹ BAĞLANTIYI KES deyin; DNS ayarınız otomatik (DHCP) moda, yani modeminizin "
+             "verdiği ayara geri döner.\n\n"
+             "İpucu: Tepsi simgesine sağ tıklayıp doğrudan ⚡ Bağlan / ⏹ Bağlantıyı Kes diyebilirsiniz; pencereyi "
+             "açmanız gerekmez."),
+
+            ("🆕 v3.7'de neler yeni?",
+             "• Sıra Örtüşmesi profili: İlk TLS parçasının önüne sahte bir el sıkışma eklenir; DPI kutusu sahte alan "
+             "adını okurken sunucu gerçeğini birleştirir. Durum takipli DPI'lara karşı yeni bir seçenek.\n\n"
+             "• 🎙 Sesli sohbet koruması (deneysel): Kanal 3'te Discord ses sunucularına giden ilk UDP paketlerinin "
+             "önüne sahte paketler eklenir. Sesli kanala bağlanamıyorsanız açın; varsayılan olarak kapalıdır.\n\n"
+             "• 🧠 Ağ hafızası: Bir ağda doğrulanmış bağlantı kurulduğunda kanal ve profil o ağ için hatırlanır. Aynı "
+             "ağa döndüğünüzde uygulama oradan başlar; elle yaptığınız seçimler her zaman önceliklidir.\n\n"
+             "• 🕵 DNS sızıntı testi: Sorgularınızı gerçekte kimin yanıtladığını ve tarayıcılarınızın kendi şifreli "
+             "DNS'ini kullanıp kullanmadığını gösterir.\n\n"
+             "• Discord alan adı listesi 21 alan adına genişletildi (yalnızca Discord profili için).\n\n"
+             "• Güncelleme bildirimi: Yeni sürüm yayınlandığında başlıkta bir düğme belirir. Uygulama kendiliğinden "
+             "hiçbir şey indirmez."),
 
             ("🔌 'BAĞLAN' ve 'BAĞLANTIYI KES' tam olarak ne yapar?",
              "BAĞLAN yalnızca ayar uygulamaz — uyguladıktan sonra Discord sunucularına gerçek bir şifreli bağlantı açıp sınar. "
              "Hâlâ engelliyse çalışan bir yöntem bulana kadar stratejileri tek tek dener ve ancak ölçtüğü bir başarıdan sonra "
              "'BAĞLI' der. Bulamazsa nedenini günlüğe yazar, butonu 'ENGEL AŞILAMADI' durumunda bırakır; size asla sahte bir "
              "'bağlandı' göstermez.\n\n"
-             "BAĞLANTIYI KES motorları durdurur, DNS'inizi geri yükler ve sonra kontrol eder: motor gerçekten durdu mu, "
+             "BAĞLANTIYI KES motorları durdurur, DNS'inizi otomatik (DHCP) moda alır ve sonra kontrol eder: motor gerçekten durdu mu, "
              "şifreli çözümleyici kapandı mı, ağ kartı hâlâ uygulamaya mı bakıyor. Eksik kalan olursa size söyler."),
 
             ("🔀 Hangi kanal? (emin değilseniz otomatik seçime güvenin)",
@@ -2005,7 +2291,9 @@ class DiscordDNSApp(ctk.CTk):
              "• Yalnızca Discord'a dokunsun: %APPDATA%\\DiscordDNS\\blacklist.txt dosyasına satır satır alan adı yazarsanız "
              "motor sadece onlara dokunur, diğer trafiğinize hiç karışmaz.\n\n"
              "• Otomatik toparlama: Bağlıyken İSS davranışını değiştirirse uygulama kendi kendine çalışan yeni bir strateji "
-             "arar ve ona geçer; sizin bir şey yapmanız gerekmez."),
+             "arar ve ona geçer; sizin bir şey yapmanız gerekmez.\n\n"
+             "• Bağlantıyı kestikten sonra bir site tarayıcıda hâlâ açılıyorsa: tarayıcınız kendi şifreli DNS'ini "
+             "kullanıyor ya da sayfayı önbellekten gösteriyor olabilir. 🕵 Sızıntı Testi bunu size söyler."),
 
             ("🔔 Pencereyi kapatmak uygulamayı kapatmaz",
              "X düğmesi uygulamayı sistem tepsisine küçültür, koruma çalışmaya devam eder. Tamamen çıkmak için tepsi "
@@ -2014,16 +2302,22 @@ class DiscordDNSApp(ctk.CTk):
              "çubuğuna bırakırsanız kalıcı görünür olur. Simgenin üzerine geldiğinizde koruma durumu yazar."),
 
             ("🛡 Ayarlarınıza ne oluyor?",
-             "Uygulama açılışta hiçbir şeye dokunmaz. BAĞLAN dediğinizde mevcut DNS ayarlarınız yedeklenir; BAĞLANTIYI KES "
-             "veya çıkış yaptığınızda tam olarak o ayarlara dönülür — DHCP'ye değil, kendi sunucularınıza.\n\n"
+             "Uygulama açılışta DNS'i otomatik (DHCP) moda alır. BAĞLAN dediğinizde seçtiğiniz kanala göre DNS "
+             "ayarlanır; BAĞLANTIYI KES veya çıkış yaptığınızda ağ kartı yeniden otomatik (DHCP) moda döner, yani "
+             "modeminizin ya da İSS'nizin verdiği DNS kullanılır. Elle yazılmış eski bir DNS'te takılı kalmazsınız.\n\n"
              "Uygulama zorla kapatılırsa diye iki güvenlik ağı vardır: ikincil DNS olarak Cloudflare yazılır, böylece "
-             "internetiniz kesilmez; ve uygulama bir sonraki açılışında yedekten geri yükler. Ağ sürücüsü, son bağlantı "
-             "kapandığında Windows tarafından kaldırılır."),
+             "internetiniz kesilmez; ve uygulama bir sonraki açılışında DNS'i otomatik moda geri alır. Ağ sürücüsü, son "
+             "bağlantı kapandığında Windows tarafından kaldırılır.\n\n"
+             "Ağ hafızası yalnızca bu bilgisayarda, %APPDATA%\\DiscordDNS\\networks.json dosyasında tutulur ve ağı "
+             "kısaltılmış bir parmak iziyle tanır. Silmek için tepsi menüsünden 'Bu Ağın Hafızasını Sil'i seçin."),
 
             ("📜 Lisans & Telif Bilgisi",
              "Geliştirici: Berk Elmalı (https://github.com/berkelmali/Discord-DNS)\n"
              "Bu proje açık kaynak kodludur. Kodları kullanan veya yeniden dağıtan herkes geliştirici atıf şartını "
-             "korumakla yükümlüdür.")
+             "korumakla yükümlüdür.\n\n"
+             "İlham alınan açık kaynak projeler: GoodbyeDPI (ValdikSS, Apache-2.0), zapret (bol-van, MIT) ve "
+             "zapret-discord-youtube (Flowseal, MIT). Bu projelerin kodu kullanılmamıştır; teknikler bağımsız olarak "
+             "yeniden yazılmıştır.")
         ]
 
         for title, desc in text_sections:
@@ -2351,11 +2645,15 @@ class DiscordDNSApp(ctk.CTk):
             ok, message = strategy_finder.apply_report(report)
             self._ui(self.log, message)
             if ok:
+                self.selected_profile = report.best.profile
+                self._active_mode = report.best.profile
+                self._ui(self._show_profile, report.best.profile)
                 self._ui(self.channel_seg.set, "⚡ Kanal 3: DPI Bypass")
-                self.active_channel = "Kanal 3: DPI Bypass"
+                self.active_channel = "⚡ Kanal 3: DPI Bypass"
+                self._ui(self._save_settings)
         elif report.dns_hijack_suspected:
             self._ui(self.channel_seg.set, "🔒 Kanal 2: DoH Şifreli")
-            self.active_channel = "Kanal 2: DoH Şifreli"
+            self.active_channel = "🔒 Kanal 2: DoH Şifreli"
             self._ui(self.log, "↪ Kanal 2 (şifreli DNS) seçildi — engel DNS katmanında.")
 
         self._ui(self.refresh_status)

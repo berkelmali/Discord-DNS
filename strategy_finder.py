@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — Automatic Strategy Finder
+Discord DNS v3.7 — Automatic Strategy Finder
 Works out which bypass profile actually works on *this* line, by measuring
 instead of guessing.
 
@@ -289,5 +289,5 @@ def apply_report(report: FinderReport) -> Tuple[bool, str]:
     if report.best is None:
         return False, "Uygun bir profil bulunamadı."
     engine = dpi_engine.get_engine()
-    engine.config = dpi_engine.PRESETS[report.best.profile]
+    engine.config = dpi_engine.configured(report.best.profile)
     return engine.start()

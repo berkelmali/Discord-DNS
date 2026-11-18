@@ -1,5 +1,5 @@
 """
-Discord DNS v3.6 — WinDivert 2.2 ctypes Binding
+Discord DNS v3.7 — WinDivert 2.2 ctypes Binding
 Minimal, dependency-free binding to the WinDivert user-mode API used by the
 native DPI bypass engine. This replaces the external goodbyedpi.exe dependency:
 all packet logic lives in dpi_engine.py, this module only talks to the driver.
